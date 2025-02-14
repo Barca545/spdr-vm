@@ -1,0 +1,12 @@
+{
+  "editor.detectIndentation": true,
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2,
+  "editor.indentSize": "tabSize",
+  "rust-analyzer.linkedProjects": [],
+  "rust-analyzer.showUnlinkedFileNotification": false,
+  "editor.formatOnSave": false,
+  "[rust]": {
+    "editor.formatOnSave": true
+  },
+  }
