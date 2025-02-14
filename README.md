@@ -11,7 +11,7 @@ A register based virtual machine written in Rust. Intended for running scripts i
 
 ## Calling convention
 - Caller cleans meaning the caller is responsible for placing arguments on the stack and removing any arguments and returns from the stack.
-- For non-recursive functions, the first ten (10) arguments are passed into the function via registers 3-12. After the first ten, the registers are pushed onto the stack.
+- For non-recursive functions, the first ten (10) arguments are passed into the function via registers 3-12. After the first ten, the arguments are pushed onto the stack.
 - For recursive functions, all arguments are pushed onto the stack.
 
 ### Using a stack frame
