@@ -10,3 +10,4 @@ thiserror = "1.0.58"
 eyre = "0.6.12"
 num-traits = "0.2"
 num-derive = "0.3"
+spdr_isa = {git = "https://github.com/Barca545/spdr_isa.git"}

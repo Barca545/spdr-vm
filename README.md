@@ -1,4 +1,4 @@
-# The Galaxy Virtual Machine
+# The SPDR Virtual Machine
 
 A register based virtual machine written in Rust. Intended for running scripts in a game I am developing.
 
@@ -8,6 +8,7 @@ A register based virtual machine written in Rust. Intended for running scripts i
 - `u16::MAX` memory with a 20 byte stack.
 - Program counter register indexed by `VM::PC`.
 - Stack pointer register indexed by `VM::SP`.
+- Relies on the [spider_isa](https://github.com/Barca545/spdr_isa).
 
 ## Calling convention
 - Caller cleans meaning the caller is responsible for placing arguments on the stack and removing any arguments and returns from the stack.

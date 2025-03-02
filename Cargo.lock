@@ -25,6 +25,7 @@ dependencies = [
  "eyre",
  "num-derive",
  "num-traits",
+ "spdr_isa",
  "thiserror",
 ]
 
@@ -76,6 +77,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa76aaf39101c457836aec0ce2316dbdc3ab723cdda1c6bd4e6ad4208acaca7"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "spdr_isa"
+version = "0.1.0"
+source = "git+https://github.com/Barca545/spdr_isa.git#f81ce2f67f5d22d42d033ea68a3ceb7f87575d8e"
+dependencies = [
+ "eyre",
+ "num-derive",
+ "num-traits",
 ]
 
 [[package]]

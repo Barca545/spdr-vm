@@ -1,4 +1,4 @@
-use std::ops::{Index, Not};
+use std::ops::Not;
 
 #[derive(Debug, Clone, Copy, PartialEq,)]
 /// Struct representing a 32bit or 4 byte block of memory in the
@@ -67,30 +67,6 @@ impl Not for Memory {
       true => Memory([0; 4],),
       false => Memory([1; 4],),
     }
-  }
-}
-
-pub(crate) struct Program {
-  pub(crate) inner:Vec<u8,>,
-}
-
-impl Program {
-  pub(crate) fn new() -> Self {
-    Program { inner:vec![], }
-  }
-}
-
-impl From<Vec<u8,>,> for Program {
-  fn from(value:Vec<u8,>,) -> Self {
-    Program { inner:value, }
-  }
-}
-
-impl Index<u32,> for Program {
-  type Output = u8;
-
-  fn index(&self, index:u32,) -> &Self::Output {
-    &self.inner[index as usize]
   }
 }
 

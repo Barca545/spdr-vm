@@ -1,35 +1,28 @@
 use crate::{
   errors::VMErrors,
-  memory::{FromBytes, Memory, Program},
-  opcodes::OpCode,
+  memory::{FromBytes, Memory},
 };
 use num_traits::FromPrimitive;
+use spdr_isa::{
+  memory::{MEM_SIZE, STACK_SIZE},
+  program::Program,
+  registers::{EQ, PC, REG_COUNT, SP},
+  OpCode,
+};
 use std::any::Any;
-
-// Refactor:
-// - Verify the compiler lets sub and divide work with the arguments in either
-//   order. ARM has a reverse subtract opcode https://iitd-plos.github.io/col718/ref/arm-instructionset.pdf
-//   that solves some of my issues with figuring out how to handle types of
-//   subtraction operations
-// - I *might* need immediate memory read/write methods
-
-// EVERYTHING ABOVE THIS LINE SHOULD GO TO ITS OWN CRATE EVENTUALLY
-
-/// Length of the portion in `mem` (from R0-R19) used as the VM's "stack".
-const STACK_SIZE:usize = 20;
 
 /// # The Galaxy Virtual Machine
 ///
 /// ## Specs
 /// - Little endian.
 /// - 255 four (4) byte registers.
-/// - [`u16::MAX`] memory with a 20 byte stack.
-/// - Program counter register indexed by [`VM::PC`].
-/// - Stack pointer register indexed by [`VM::SP`].
+/// - memory with a 20 byte stack.
+/// - Program counter register indexed by [`PC`].
+/// - Stack pointer register indexed by [`SP`].
 ///
 /// ## Calling convention
-/// - Caller cleans meaning the caller is responsible for placing arguments on
-///   the stack and removing any arguments and returns from the stack.
+/// - Caller cleans: The caller is responsible for placing arguments on the
+///   stack and removing any arguments and returns from the stack.
 /// - For non-recursive functions, the first ten (10) arguments are passed into
 ///   the function via registers 3-12. After the first ten, the registers are
 ///   pushed onto the stack.
@@ -53,13 +46,14 @@ pub struct VM {
   /// - R0 is the [`Program Counter`](https://en.wikipedia.org/wiki/Program_counter).
   /// - R1 is the [`Stack Pointer`](https://en.wikipedia.org/wiki/Stack_register).
   /// - R2 stores the result of equality checks.
-  /// - R3-R12 store function arguments and returns. If a function has more than
-  ///   ten (10) arguments or returns, they are placed on the stack.
-  reg:[Memory; 255],
+  /// - R3-R12 store function arguments and returns. Functions with more than
+  ///   ten (10) arguments or returns should place their arguments/returns on
+  ///   the stack.
+  reg:[Memory; REG_COUNT as usize],
   /// Memory holding 4 bytes per slot.
   ///
   /// The Stack is slots MEM19-MEM0. Grows downwards.
-  mem:[Memory; u16::MAX as usize],
+  mem:[Memory; MEM_SIZE],
   /// The currently executing program.
   program:Program,
   /// Tracks the first free memory address on the heap.
@@ -69,20 +63,11 @@ pub struct VM {
 }
 
 impl VM {
-  /// Program counter. Contains the address of the next [`OpCode`] instruction.
-  const PC:usize = 0;
-
-  /// Stack pointer. Points to the top (last filled) slot on the stack.
-  const SP:usize = 1;
-
-  /// Register which holds the result of the [`VM`]'s last equality check.
-  const EQ:usize = 2;
-
   pub fn new() -> Self {
     let mut vm = VM {
       running:false,
-      reg:[Memory::new(); 255],
-      mem:[Memory::new(); u16::MAX as usize],
+      reg:[Memory::new(); REG_COUNT as usize],
+      mem:[Memory::new(); MEM_SIZE],
       program:Program::new(),
       // Free starts on the 20th slot in memory because the first 19 are taken
       // up by the stack
@@ -92,28 +77,28 @@ impl VM {
 
     // Update the stack pointer in the VM since it needs to start at 20 (Empty
     // stack)
-    vm.reg[Self::SP] = Memory::from(20u32,);
+    vm.reg[SP] = Memory::from(20u32,);
 
     // Return the VM
     vm
   }
 
-  /// Get an immutable reference to the PC register [`Self::PC`].
+  /// Get an immutable reference to the PC register [`PC`].
   #[inline(always)]
   fn pc(&self,) -> &Memory {
-    &self.reg[Self::PC]
+    &self.reg[PC]
   }
 
-  /// Get a mutable reference to the PC register [`Self::PC`].
+  /// Get a mutable reference to the PC register [`PC`].
   #[inline(always)]
   fn pc_mut(&mut self,) -> &mut Memory {
-    &mut self.reg[Self::PC]
+    &mut self.reg[PC]
   }
 
-  /// Get an immutable reference to the SP register [`Self::SP`].
+  /// Get an immutable reference to the SP register [`SP`].
   #[inline(always)]
   fn sp(&self,) -> &Memory {
-    &self.reg[Self::SP]
+    &self.reg[SP]
   }
 
   /// Helper function to manage decrementing the stack pointer.
@@ -123,7 +108,7 @@ impl VM {
       panic!("{}", VMErrors::EmptyStack)
     }
     // Decrement the SP (grows downards so ad one)
-    self.reg[Self::SP] = Memory::from(self.sp().as_u32() + amt,);
+    self.reg[SP] = Memory::from(self.sp().as_u32() + amt,);
   }
 
   #[inline(always)]
@@ -133,7 +118,7 @@ impl VM {
       panic!("{}", VMErrors::StackOverflow)
     }
     // Increment the SP (grows downards so subtract one)
-    self.reg[Self::SP] = Memory::from(self.sp().as_u32() - amt,);
+    self.reg[SP] = Memory::from(self.sp().as_u32() - amt,);
   }
 
   /// Retrieves the next byte in the program.
@@ -147,10 +132,10 @@ impl VM {
 
   fn next_4_bytes<T:FromBytes,>(&mut self,) -> T {
     let bytes = [
-      self.program[self.reg[Self::PC].as_u32()],
-      self.program[self.reg[Self::PC].as_u32() + 1],
-      self.program[self.reg[Self::PC].as_u32() + 2],
-      self.program[self.reg[Self::PC].as_u32() + 3],
+      self.program[self.reg[PC].as_u32()],
+      self.program[self.reg[PC].as_u32() + 1],
+      self.program[self.reg[PC].as_u32() + 2],
+      self.program[self.reg[PC].as_u32() + 3],
     ];
 
     // Increment the pc
@@ -182,9 +167,12 @@ impl VM {
       OpCode::Copy => self.copy(),
       OpCode::AddRI => self.add_ri(),
       OpCode::SubRI => self.sub_ri(),
+      OpCode::RvSubRI => self.rvsub_ri(),
       OpCode::MulRI => self.mul_ri(),
       OpCode::DivRI => self.div_ri(),
+      OpCode::RvDivRI => self.rvdiv_ri(),
       OpCode::PowRI => self.pow_ri(),
+      OpCode::RvPowRI => self.rvpow_ri(),
       OpCode::AddRR => self.add_rr(),
       OpCode::SubRR => self.sub_rr(),
       OpCode::MulRR => self.mul_rr(),
@@ -197,6 +185,7 @@ impl VM {
       OpCode::Not => self.not(),
       OpCode::Jmp => self.jmp(),
       OpCode::Jnz => self.jnz(),
+      OpCode::Jz => todo!(),
       OpCode::Call => self.call(),
       OpCode::SysCall => self.sys_call(),
       OpCode::Ret => self.ret(),
@@ -220,9 +209,12 @@ impl VM {
       OpCode::Copy => self.copy(),
       OpCode::AddRI => self.add_ri(),
       OpCode::SubRI => self.sub_ri(),
+      OpCode::RvSubRI => self.rvsub_ri(),
       OpCode::MulRI => self.mul_ri(),
       OpCode::DivRI => self.div_ri(),
+      OpCode::RvDivRI => self.rvdiv_ri(),
       OpCode::PowRI => self.pow_ri(),
+      OpCode::RvPowRI => self.rvpow_ri(),
       OpCode::AddRR => self.add_rr(),
       OpCode::SubRR => self.sub_rr(),
       OpCode::MulRR => self.mul_rr(),
@@ -235,6 +227,8 @@ impl VM {
       OpCode::Not => self.not(),
       OpCode::Jmp => self.jmp(),
       OpCode::Jnz => self.jnz(),
+      OpCode::Noop => {}
+      OpCode::Jz => todo!(),
       OpCode::Call => self.call(),
       OpCode::SysCall => self.sys_call_with(opaque,),
       OpCode::Ret => self.ret(),
@@ -246,7 +240,6 @@ impl VM {
       OpCode::Push => self.vm_push(),
       OpCode::Pop => self.vm_pop(),
       OpCode::PopR => self.vm_pop_r(),
-      OpCode::Noop => {}
     }
   }
 
@@ -267,14 +260,14 @@ impl VM {
   }
 
   /// Load a [`Program`] into the VM.
-  pub fn upload(&mut self, program:Vec<u8,>,) {
-    let program = Program { inner:program, };
-
-    if program.inner.len() >= u32::MAX as usize {
-      panic!("{}", VMErrors::ProgramToLong(program.inner.len()))
+  pub fn upload<P,>(&mut self, program:P,)
+  where Program: From<P,> {
+    let program = Program::from(program,);
+    if program.len() >= u32::MAX as usize {
+      panic!("{}", VMErrors::ProgramToLong(program.len()))
     }
     self.program = program;
-    self.reg[Self::PC] = Memory([0, 0, 0, 0,],);
+    self.reg[PC] = Memory([0, 0, 0, 0,],);
   }
 
   /// Implementation of [`OpCode::Load`].
@@ -313,7 +306,7 @@ impl VM {
     self.reg[target] = Memory::from(a + b,);
   }
 
-  /// Implementation of [`OpCode::SubRI`].
+  /// Implementation of [`OpCode::RvSubRI`].
   #[inline(always)]
   fn sub_ri(&mut self,) {
     // Get the target register
@@ -325,8 +318,27 @@ impl VM {
     // Get the immediate f32 value
     let b = self.next_4_bytes::<f32>();
 
+    dbg!(a);
+    dbg!(b);
+
     // Store the result of the operation in the target register
     self.reg[target] = Memory::from(a - b,);
+  }
+
+  /// Implementation of [`OpCode::RSubRI`].
+  #[inline(always)]
+  fn rvsub_ri(&mut self,) {
+    // Get the target register
+    let target = self.next_byte() as usize;
+
+    // Get the operand stored in a register
+    let reg = self.next_byte() as usize;
+    let a = self.reg[reg].as_f32();
+    // Get the immediate f32 value
+    let b = self.next_4_bytes::<f32>();
+
+    // Store the result of the operation in the target register
+    self.reg[target] = Memory::from(b - a,);
   }
 
   /// Implementation of [`OpCode::MulRI`].
@@ -361,6 +373,22 @@ impl VM {
     self.reg[target] = Memory::from(a / b,);
   }
 
+  /// Implementation of [`OpCode::RvDivRI`].
+  #[inline(always)]
+  fn rvdiv_ri(&mut self,) {
+    // Get the target register
+    let target = self.next_byte() as usize;
+
+    // Get the operand stored in a register
+    let reg = self.next_byte() as usize;
+    let a = self.reg[reg].as_f32();
+    // Get the immediate f32 value
+    let b = self.next_4_bytes::<f32>();
+
+    // Store the result of the operation in the target register
+    self.reg[target] = Memory::from(b / a,);
+  }
+
   /// Implementation of [`OpCode::PowRI`].
   #[inline(always)]
   fn pow_ri(&mut self,) {
@@ -375,6 +403,22 @@ impl VM {
 
     // Store the result of the operation in the target register
     self.reg[target] = Memory::from(a.powf(b,),);
+  }
+
+  /// Implementation of [`OpCode::RvPowRI`].
+  #[inline(always)]
+  fn rvpow_ri(&mut self,) {
+    // Get the target register
+    let target = self.next_byte() as usize;
+
+    // Get the operand stored in a register
+    let reg = self.next_byte() as usize;
+    let a = self.reg[reg].as_f32();
+    // Get the immediate f32 value
+    let b = self.next_4_bytes::<f32>();
+
+    // Store the result of the operation in the target register
+    self.reg[target] = Memory::from(b.powf(a,),);
   }
 
   /// Implementation of [`OpCode::AddRR`].
@@ -457,7 +501,7 @@ impl VM {
     let b = self.next_4_bytes::<f32>();
 
     // Store the result of the operation in the target register
-    self.reg[Self::EQ] = Memory::from(a == b,);
+    self.reg[EQ] = Memory::from(a == b,);
   }
 
   /// Implementation of [`OpCode::GtRI`].
@@ -470,7 +514,7 @@ impl VM {
     let b = self.next_4_bytes::<f32>();
 
     // Store the result of the operation in the target register
-    self.reg[Self::EQ] = Memory::from(a > b,);
+    self.reg[EQ] = Memory::from(a > b,);
   }
 
   /// Implementation of [`OpCode::EqRR`].
@@ -481,7 +525,7 @@ impl VM {
     let b = self.reg[self.next_byte() as usize].as_f32();
 
     // Store the result of the operation in the target register
-    self.reg[Self::EQ] = Memory::from(a == b,);
+    self.reg[EQ] = Memory::from(a == b,);
   }
 
   /// Implementation of [`OpCode::GtRR`].
@@ -492,7 +536,7 @@ impl VM {
     let b = self.reg[self.next_byte() as usize].as_f32();
 
     // Store the result of the operation in the target register
-    self.reg[Self::EQ] = Memory::from(a > b,);
+    self.reg[EQ] = Memory::from(a > b,);
   }
 
   /// Implementation of [`OpCode::Not`].
@@ -509,7 +553,7 @@ impl VM {
   fn jmp(&mut self,) {
     let target = self.next_4_bytes();
 
-    self.reg[Self::PC] = Memory(target,)
+    self.reg[PC] = Memory(target,)
   }
 
   /// Implementation of [`OpCode::Jnz`].
@@ -519,7 +563,7 @@ impl VM {
     let cond = self.reg[self.next_byte() as usize];
 
     if cond.as_bool() {
-      self.reg[Self::PC] = Memory(target,)
+      self.reg[PC] = Memory(target,)
     }
   }
 
@@ -672,7 +716,10 @@ impl VM {
 mod test {
   use super::OpCode;
   use crate::vm::{Memory, STACK_SIZE, VM};
+  use spdr_isa::registers::{EQ, SP};
   use std::{any::Any, cell::RefCell, rc::Rc};
+
+  // TODO: Test the reverse math methods
 
   #[test]
   fn test_add_instructions() {
@@ -690,7 +737,7 @@ mod test {
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
@@ -703,25 +750,28 @@ mod test {
   fn test_sub_instructions() {
     #[rustfmt::skip]
     let program = vec![
-      // Load 15 into R1
+      // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
-      // Sub 10 from R1 and store in R2
+      // Sub 10 from R10 and store in R20
       OpCode::SubRI.into(), 20, 10, 0, 0, 32, 65,
-      // Sub R2 from R1 and store in R3
+      // Sub R20 from R10 and store in R30
       OpCode::SubRR.into(), 30, 10, 20,
+      // Sub R30 from 15 and store in R40
+      OpCode::RvSubRI.into(), 40, 30, 0, 0, 112, 65,
       // End the program
       OpCode::Hlt.into(),
     ];
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
     assert_eq!(vm.reg[10].as_f32(), 15.0);
     assert_eq!(vm.reg[20].as_f32(), 5.0);
     assert_eq!(vm.reg[30].as_f32(), 10.0);
+    assert_eq!(vm.reg[40].as_f32(), 15.0 - 10.0)
   }
 
   #[test]
@@ -740,7 +790,7 @@ mod test {
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
@@ -753,50 +803,56 @@ mod test {
   fn test_div_instructions() {
     #[rustfmt::skip]
     let program = vec![
-      // Load 15 into R1
+      // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
-      // Div R1 by 10 and store in R2
+      // Div R10 by 10 and store in R20
       OpCode::DivRI.into(), 20, 10, 0, 0, 32, 65,
-      // Div R1 by R2 and store in R3
+      // Div R10 by R20 and store in R30
       OpCode::DivRR.into(), 30, 10, 20,
+      // Divide 15 by R30 and store in R40
+      OpCode::RvDivRI.into(), 40, 30, 0, 0, 112, 65,
       // End the program
       OpCode::Hlt.into(),
     ];
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
     assert_eq!(vm.reg[10].as_f32(), 15.0);
     assert_eq!(vm.reg[20].as_f32(), 15.0 / 10.0);
     assert_eq!(vm.reg[30].as_f32(), 15.0 / (15.0 / 10.0));
+    assert_eq!(vm.reg[40].as_f32(), 15.0 / (vm.reg[30].as_f32()));
   }
 
   #[test]
   fn test_pow_instructions() {
     #[rustfmt::skip]
     let program = vec![
-      // Load 15 into R1
+      // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
-      // Raise R1 to the 10 power together and store in R2
+      // Raise R10 to the 10 power together and store in R20
       OpCode::PowRI.into(), 20, 10, 0, 0, 32, 65,
-      // Raise R1 to the R2 power and store in R3
+      // Raise R10 to the R20 power and store in R30
       OpCode::PowRR.into(), 30, 10, 20,
+      // Raise 15 to the R10 power and store in R40
+      OpCode::PowRI.into(), 40, 10, 0, 0, 112, 65,
       // End the program
       OpCode::Hlt.into(),
     ];
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
     assert_eq!(vm.reg[10].as_f32(), 15.0);
     assert_eq!(vm.reg[20].as_f32(), 15.0f32.powf(10.0));
     assert_eq!(vm.reg[30].as_f32(), 15.0f32.powf(15.0f32.powf(10.0)));
+    assert_eq!(vm.reg[40].as_f32(), 15.0f32.powf(vm.reg[10].as_f32()));
   }
 
   #[test]
@@ -808,27 +864,27 @@ mod test {
       // Compare R20 and 10
       OpCode::EqRI.into(), 20, 0, 0, 32, 65,
       // Move the result into R30
-      OpCode::Copy.into(), 30, VM::EQ as u8,
+      OpCode::Copy.into(), 30, EQ as u8,
       // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
       // Compare R10 and R20
       OpCode::EqRR.into(), 10, 20,
       // Store Not EQ in R40
-      OpCode::Not.into(), 40, VM::EQ as u8,
+      OpCode::Not.into(), 40, EQ as u8,
       // End the program
       OpCode::Hlt.into(),
     ];
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
     assert_eq!(vm.reg[10].as_f32(), 15.0);
     assert_eq!(vm.reg[20].as_f32(), 15.0);
     assert_eq!(vm.reg[30].as_bool(), false);
-    assert_eq!(vm.reg[VM::EQ].as_bool(), true);
+    assert_eq!(vm.reg[EQ].as_bool(), true);
     assert_eq!(vm.reg[40].as_bool(), false);
   }
 
@@ -870,7 +926,7 @@ mod test {
 
     let mut vm = VM::new();
 
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     vm.run();
 
@@ -892,7 +948,7 @@ mod test {
       ]
     );
     // Check nothing interfered with the EQ check
-    assert_eq!(vm.reg[VM::EQ].as_usize(), 0);
+    assert_eq!(vm.reg[EQ].as_usize(), 0);
     // Check MemCpy copies from mem[22] to mem[39]
     assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), 4.0);
     assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), vm.mem[39].as_f32());
@@ -973,10 +1029,10 @@ mod test {
     #[rustfmt::skip]
     program.extend_from_slice(&[
       // Read the arguments from the stack there is a by one offset from the SP because the top of the stack holds the return pointer
-      OpCode::RMem.into(), 230, VM::SP as u8, 0, 0, 128, 63, 0, 0, 0, 0,
-      OpCode::RMem.into(), 231, VM::SP as u8, 0, 0, 0, 64, 0, 0, 0, 0,
-      OpCode::RMem.into(), 232, VM::SP as u8, 0, 0, 64, 64, 0, 0, 0, 0,
-      OpCode::RMem.into(), 233, VM::SP as u8, 0, 0, 128, 64, 0, 0, 0, 0,
+      OpCode::RMem.into(), 230, SP as u8, 0, 0, 128, 63, 0, 0, 0, 0,
+      OpCode::RMem.into(), 231, SP as u8, 0, 0, 0, 64, 0, 0, 0, 0,
+      OpCode::RMem.into(), 232, SP as u8, 0, 0, 64, 64, 0, 0, 0, 0,
+      OpCode::RMem.into(), 233, SP as u8, 0, 0, 128, 64, 0, 0, 0, 0,
       // let t1 = a + b
       OpCode::AddRR.into(), 230, 230, 231,
       // let t2 = c + d
@@ -988,12 +1044,12 @@ mod test {
     ]);
 
     let mut vm = VM::new();
-    vm.upload(program.into(),);
+    vm.upload(program,);
     vm.run();
 
     assert_eq!(vm.reg[30].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
     assert_eq!(vm.reg[31].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
-    assert_eq!(vm.reg[VM::SP].as_usize(), 20);
+    assert_eq!(vm.reg[SP].as_usize(), 20);
   }
 
   #[test]
@@ -1087,7 +1143,7 @@ mod test {
     let mut vm = VM::new();
     vm.register_extern(test_1_wrapper,);
     vm.register_extern(test_2_wrapper,);
-    vm.upload(program.into(),);
+    vm.upload(program,);
 
     // Ensuring the VM can borrow the Rc even when another thing owns it
     let _extra_borrow = opaque.hard_to_reach.clone();
@@ -1107,7 +1163,7 @@ mod test {
 
     // Set up the VM and run the program
     let mut vm = VM::new();
-    vm.upload(underflow.into(),);
+    vm.upload(underflow,);
     vm.run();
   }
 
@@ -1143,7 +1199,7 @@ mod test {
 
     // Set up the VM and run the program
     let mut vm = VM::new();
-    vm.upload(overflow.into(),);
+    vm.upload(overflow,);
     vm.run();
   }
 }
