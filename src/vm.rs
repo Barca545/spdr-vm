@@ -5,27 +5,31 @@ use crate::{
 use num_traits::FromPrimitive;
 use spdr_isa::{
   memory::{MEM_SIZE, STACK_SIZE},
+  opcodes::{CmpFlag, OpCode},
   program::Program,
   registers::{EQ, PC, REG_COUNT, SP},
-  OpCode,
 };
-use std::any::Any;
+use std::{any::Any, io::Write};
+
+// Refactor:
+// - I either need to add GEQ/LEQ opcodes or just have one CMP instruction which
+//   takes a flag to indicate which operation it is doing.
 
 /// # The Galaxy Virtual Machine
 ///
 /// ## Specs
 /// - Little endian.
 /// - 255 four (4) byte registers.
-/// - memory with a 20 byte stack.
-/// - Program counter register indexed by [`PC`].
-/// - Stack pointer register indexed by [`SP`].
+/// - Memory with a 20 byte stack.
+/// - Program counter register indexed by [`PC`], a `u32` value.
+/// - Stack pointer register indexed by [`SP`], a `u32` value.
 ///
 /// ## Calling convention
 /// - Caller cleans: The caller is responsible for placing arguments on the
 ///   stack and removing any arguments and returns from the stack.
 /// - For non-recursive functions, the first ten (10) arguments are passed into
-///   the function via registers 3-12. After the first ten, the registers are
-///   pushed onto the stack.
+///   the function registers. After the first ten, the registers are pushed onto
+///   the stack.
 /// - For recursive functions, all arguments are pushed onto the stack.
 ///
 /// ### Using a stack frame
@@ -46,7 +50,7 @@ pub struct VM {
   /// - R0 is the [`Program Counter`](https://en.wikipedia.org/wiki/Program_counter).
   /// - R1 is the [`Stack Pointer`](https://en.wikipedia.org/wiki/Stack_register).
   /// - R2 stores the result of equality checks.
-  /// - R3-R12 store function arguments and returns. Functions with more than
+  /// - R4-R14 store function arguments and returns. Functions with more than
   ///   ten (10) arguments or returns should place their arguments/returns on
   ///   the stack.
   reg:[Memory; REG_COUNT as usize],
@@ -132,10 +136,10 @@ impl VM {
 
   fn next_4_bytes<T:FromBytes,>(&mut self,) -> T {
     let bytes = [
-      self.program[self.reg[PC].as_u32()],
-      self.program[self.reg[PC].as_u32() + 1],
-      self.program[self.reg[PC].as_u32() + 2],
-      self.program[self.reg[PC].as_u32() + 3],
+      self.program[self.pc().as_u32()],
+      self.program[self.pc().as_u32() + 1],
+      self.program[self.pc().as_u32() + 2],
+      self.program[self.pc().as_u32() + 3],
     ];
 
     // Increment the pc
@@ -147,10 +151,9 @@ impl VM {
 
   fn decode(&mut self,) -> OpCode {
     let op_byte = self.program[self.pc().as_u32()];
-    let op = FromPrimitive::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte,),).unwrap();
+    let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte,),).unwrap();
 
     *self.pc_mut() = Memory::from(self.pc().as_u32() + 1,);
-
     op
   }
 
@@ -160,7 +163,7 @@ impl VM {
   }
 
   /// Execute the next instruction of the [`Program`].
-  pub fn execute(&mut self,) {
+  fn execute(&mut self,) {
     match self.decode() {
       OpCode::Hlt => self.running = false,
       OpCode::Load => self.load(),
@@ -178,14 +181,12 @@ impl VM {
       OpCode::MulRR => self.mul_rr(),
       OpCode::DivRR => self.div_rr(),
       OpCode::PowRR => self.pow_rr(),
-      OpCode::EqRI => self.eq_ri(),
-      OpCode::GtRI => self.gt_ri(),
-      OpCode::EqRR => self.eq_rr(),
-      OpCode::GtRR => self.gt_rr(),
+      OpCode::CmpRI => self.cmp_ri(),
+      OpCode::CmpRR => self.cmp_rr(),
       OpCode::Not => self.not(),
       OpCode::Jmp => self.jmp(),
       OpCode::Jnz => self.jnz(),
-      OpCode::Jz => todo!(),
+      OpCode::Jz => self.jz(),
       OpCode::Call => self.call(),
       OpCode::SysCall => self.sys_call(),
       OpCode::Ret => self.ret(),
@@ -202,7 +203,7 @@ impl VM {
   }
 
   /// Execute the next instruction of the [`Program`].
-  pub fn execute_with(&mut self, opaque:&mut dyn Any,) {
+  fn execute_with(&mut self, opaque:&mut dyn Any,) {
     match self.decode() {
       OpCode::Hlt => self.running = false,
       OpCode::Load => self.load(),
@@ -220,15 +221,13 @@ impl VM {
       OpCode::MulRR => self.mul_rr(),
       OpCode::DivRR => self.div_rr(),
       OpCode::PowRR => self.pow_rr(),
-      OpCode::EqRI => self.eq_ri(),
-      OpCode::GtRI => self.gt_ri(),
-      OpCode::EqRR => self.eq_rr(),
-      OpCode::GtRR => self.gt_rr(),
+      OpCode::CmpRI => self.cmp_ri(),
+      OpCode::CmpRR => self.cmp_rr(),
       OpCode::Not => self.not(),
       OpCode::Jmp => self.jmp(),
       OpCode::Jnz => self.jnz(),
+      OpCode::Jz => self.jz(),
       OpCode::Noop => {}
-      OpCode::Jz => todo!(),
       OpCode::Call => self.call(),
       OpCode::SysCall => self.sys_call_with(opaque,),
       OpCode::Ret => self.ret(),
@@ -317,9 +316,6 @@ impl VM {
     let a = self.reg[reg].as_f32();
     // Get the immediate f32 value
     let b = self.next_4_bytes::<f32>();
-
-    dbg!(a);
-    dbg!(b);
 
     // Store the result of the operation in the target register
     self.reg[target] = Memory::from(a - b,);
@@ -491,52 +487,46 @@ impl VM {
     self.reg[target] = Memory::from(a.powf(b,),);
   }
 
-  /// Implementation of [`OpCode::EqRI`].
   #[inline(always)]
-  fn eq_ri(&mut self,) {
+  /// Implementation of [`OpCode::CmpRI`].
+  fn cmp_ri(&mut self,) {
+    // Get the Cmp Flag
+    let flag = CmpFlag::from(self.next_byte(),);
+
     // Get the operand stored in a register
-    let src_reg = self.next_byte() as usize;
-    let a = self.reg[src_reg].as_f32();
+    let a = self.reg[self.next_byte() as usize].as_f32();
+
     // Get the immediate f32 value
     let b = self.next_4_bytes::<f32>();
 
     // Store the result of the operation in the target register
-    self.reg[EQ] = Memory::from(a == b,);
+    match flag {
+      CmpFlag::Eq => self.reg[EQ] = Memory::from(a == b,),
+      CmpFlag::Gt => self.reg[EQ] = Memory::from(a > b,),
+      CmpFlag::Lt => self.reg[EQ] = Memory::from(a < b,),
+      CmpFlag::Geq => self.reg[EQ] = Memory::from(a >= b,),
+      CmpFlag::Leq => self.reg[EQ] = Memory::from(a <= b,),
+    }
   }
 
-  /// Implementation of [`OpCode::GtRI`].
   #[inline(always)]
-  fn gt_ri(&mut self,) {
-    // Get the operand stored in a register
-    let src_reg = self.next_byte() as usize;
-    let a = self.reg[src_reg].as_f32();
-    // Get the immediate f32 value
-    let b = self.next_4_bytes::<f32>();
+  /// Implementation of [`OpCode::CmpRR`].
+  fn cmp_rr(&mut self,) {
+    // Get the Cmp Flag
+    let flag = CmpFlag::from(self.next_byte(),);
 
-    // Store the result of the operation in the target register
-    self.reg[EQ] = Memory::from(a > b,);
-  }
-
-  /// Implementation of [`OpCode::EqRR`].
-  #[inline(always)]
-  fn eq_rr(&mut self,) {
     // Get the operands R0 is the next by and R1 is the subsequent byte
     let a = self.reg[self.next_byte() as usize].as_f32();
     let b = self.reg[self.next_byte() as usize].as_f32();
 
     // Store the result of the operation in the target register
-    self.reg[EQ] = Memory::from(a == b,);
-  }
-
-  /// Implementation of [`OpCode::GtRR`].
-  #[inline(always)]
-  fn gt_rr(&mut self,) {
-    // Get the operands R0 is the next by and R1 is the subsequent byte
-    let a = self.reg[self.next_byte() as usize].as_f32();
-    let b = self.reg[self.next_byte() as usize].as_f32();
-
-    // Store the result of the operation in the target register
-    self.reg[EQ] = Memory::from(a > b,);
+    match flag {
+      CmpFlag::Eq => self.reg[EQ] = Memory::from(a == b,),
+      CmpFlag::Gt => self.reg[EQ] = Memory::from(a > b,),
+      CmpFlag::Lt => self.reg[EQ] = Memory::from(a < b,),
+      CmpFlag::Geq => self.reg[EQ] = Memory::from(a >= b,),
+      CmpFlag::Leq => self.reg[EQ] = Memory::from(a <= b,),
+    }
   }
 
   /// Implementation of [`OpCode::Not`].
@@ -559,11 +549,22 @@ impl VM {
   /// Implementation of [`OpCode::Jnz`].
   #[inline(always)]
   fn jnz(&mut self,) {
-    let target = self.next_4_bytes();
     let cond = self.reg[self.next_byte() as usize];
+    let target = self.next_4_bytes();
 
     if cond.as_bool() {
-      self.reg[PC] = Memory(target,)
+      *self.pc_mut() = Memory(target,)
+    }
+  }
+
+  /// Implementation of [`OpCode::Jz`].
+  #[inline(always)]
+  fn jz(&mut self,) {
+    let cond = self.reg[self.next_byte() as usize];
+    let target = self.next_4_bytes();
+
+    if !cond.as_bool() {
+      *self.pc_mut() = Memory(target,)
     }
   }
 
@@ -710,16 +711,31 @@ impl VM {
     self.reg[self.next_byte() as usize] = self.mem[self.sp().as_usize()];
     self.stack_dec(1,);
   }
+
+  // Debugging implementations
+
+  /// Write each instruction into the provided [writer](Write) before executing
+  /// it.
+  pub fn dbg_run<W:Write,>(&mut self, mut w:W,) {
+    self.running = true;
+    while self.running {
+      let op_byte = self.program[self.pc().as_u32()];
+      let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte,),).unwrap();
+      write!(w, "{}, ", op).unwrap();
+      self.execute();
+    }
+  }
 }
 
 #[cfg(test)]
 mod test {
   use super::OpCode;
   use crate::vm::{Memory, STACK_SIZE, VM};
-  use spdr_isa::registers::{EQ, SP};
+  use spdr_isa::{
+    opcodes::CmpFlag,
+    registers::{EQ, SP},
+  };
   use std::{any::Any, cell::RefCell, rc::Rc};
-
-  // TODO: Test the reverse math methods
 
   #[test]
   fn test_add_instructions() {
@@ -862,13 +878,13 @@ mod test {
       // Load 15 into R20
       OpCode::Load.into(), 20, 0, 0, 112, 65,
       // Compare R20 and 10
-      OpCode::EqRI.into(), 20, 0, 0, 32, 65,
+      OpCode::CmpRI.into(), CmpFlag::Eq.into(), 20, 0, 0, 32, 65,
       // Move the result into R30
       OpCode::Copy.into(), 30, EQ as u8,
       // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
       // Compare R10 and R20
-      OpCode::EqRR.into(), 10, 20,
+      OpCode::CmpRR.into(), CmpFlag::Eq.into(), 10, 20,
       // Store Not EQ in R40
       OpCode::Not.into(), 40, EQ as u8,
       // End the program
@@ -1050,6 +1066,42 @@ mod test {
     assert_eq!(vm.reg[30].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
     assert_eq!(vm.reg[31].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
     assert_eq!(vm.reg[SP].as_usize(), 20);
+  }
+
+  #[test]
+  fn test_jmp_jnz_jz() {
+    // Loads are to test lines are skipped
+    #[rustfmt::skip]
+    let program = &[
+      OpCode::Jmp.into(), 35, 0, 0, 0, // Jump to 35
+      // 2nd jump target
+      OpCode::Load.into(), EQ as u8, 1, 0, 0, 0,
+      OpCode::Jnz.into(), EQ as u8, 53, 0, 0, 0, // Jump to 53
+      OpCode::Load.into(), 16 as u8, 0, 0, 128, 63, // Load 1 into 16
+      OpCode::Load.into(), 17 as u8, 0, 0, 128, 63, // Load 1 into 17
+      OpCode::Load.into(), 18 as u8, 0, 0, 128, 63, // Load 1 into 18
+      // 1st jump target
+      OpCode::Jz.into(), EQ as u8, 5, 0, 0, 0, // Jump to 5
+      OpCode::Load.into(), 14 as u8, 14, 0, 0, 0, // Load 1 into 14
+      OpCode::Load.into(), 19 as u8, 0, 0, 128, 63, // Load 1 into 19
+      // 3rd jump target
+      OpCode::Hlt.into(),
+    ];
+
+    let mut vm = VM::new();
+
+    vm.upload(program,);
+    let mut w = Vec::new();
+    vm.dbg_run(&mut w,);
+
+    assert_eq!(vm.reg[EQ].as_bool(), true);
+    assert_eq!(vm.reg[14].as_f32(), 0.0);
+    assert_eq!(vm.reg[16].as_f32(), 0.0);
+    assert_eq!(vm.reg[17].as_f32(), 0.0);
+    assert_eq!(vm.reg[18].as_f32(), 0.0);
+    assert_eq!(vm.reg[19].as_f32(), 0.0);
+    // Check the correct instructions executed
+    assert_eq!(String::from_utf8(w).unwrap().trim(), "Jmp, Jz, Load, Jnz, Hlt,".to_owned());
   }
 
   #[test]
