@@ -725,6 +725,11 @@ impl VM {
       self.execute();
     }
   }
+
+  /// Retrieve the value in a requested register as a [`Memory`] block.
+  pub fn dbg_reg(&self, reg:usize,) -> Memory {
+    self.reg[reg]
+  }
 }
 
 #[cfg(test)]

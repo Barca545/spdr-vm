@@ -3,7 +3,7 @@ use std::ops::Not;
 #[derive(Debug, Clone, Copy, PartialEq,)]
 /// Struct representing a 32bit or 4 byte block of memory in the
 /// [`VM`](crate::vm::VM).
-pub(crate) struct Memory(pub(crate) [u8; 4],);
+pub struct Memory(pub(crate) [u8; 4],);
 
 impl Memory {
   /// Create a new `Memory`.
@@ -71,7 +71,7 @@ impl Not for Memory {
 }
 
 /// Implemented by types which can be created from a [`Memory`] block.
-pub(crate) trait FromBytes: Sized {
+pub trait FromBytes: Sized {
   /// Convert a bloc of memory into the target type.
   fn from(bytes:[u8; 4],) -> Self;
 }
