@@ -7,27 +7,27 @@ pub struct Memory(pub(crate) [u8; 4],);
 
 impl Memory {
   /// Create a new `Memory`.
-  pub(crate) fn new() -> Self {
+  pub fn new() -> Self {
     Memory([0; 4],)
   }
 
   /// Translate the underlying bits of the input into an [`f32`].
-  pub(crate) fn as_f32(self,) -> f32 {
+  pub fn as_f32(self,) -> f32 {
     f32::from_le_bytes(self.0,)
   }
 
   /// Translate the underlying bits of the input into a [`bool`].
-  pub(crate) fn as_bool(self,) -> bool {
+  pub fn as_bool(self,) -> bool {
     !([0; 4] == self.0)
   }
 
   /// Translate the underlying bits of the input into a [`u32`].
-  pub(crate) fn as_u32(self,) -> u32 {
+  pub fn as_u32(self,) -> u32 {
     u32::from_le_bytes(self.0,)
   }
 
   /// Translate the underlying bits of the input into a [`usize`].
-  pub(crate) fn as_usize(self,) -> usize {
+  pub fn as_usize(self,) -> usize {
     self.0[0] as usize
   }
 }
