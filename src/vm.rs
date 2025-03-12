@@ -87,6 +87,21 @@ impl VM {
     vm
   }
 
+  /// Return a reference to the VM's `running` field.
+  pub fn running(&self,) -> &bool {
+    &self.running
+  }
+
+  /// Return a reference to the VM's registers.
+  pub fn reg(&self,) -> &[Memory; REG_COUNT] {
+    &self.reg
+  }
+
+  /// Return a reference to the VM's mem.
+  pub fn mem(&self,) -> &[Memory; MEM_SIZE] {
+    &self.mem
+  }
+
   /// Get an immutable reference to the PC register [`PC`].
   #[inline(always)]
   fn pc(&self,) -> &Memory {
