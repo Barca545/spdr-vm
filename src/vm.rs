@@ -587,7 +587,7 @@ impl VM {
   #[inline(always)]
   fn call(&mut self,) {
     // Get the function ptr
-    let fn_ptr = self.next_byte() as usize;
+    let fn_ptr = self.next_4_bytes::<u32>();
 
     // Increment the SP (grows downards so subtract one)
     self.stack_inc(1,);
@@ -1012,48 +1012,22 @@ mod test {
   #[test]
   fn push_pop_call_return() {
     // Location of test 1 in memory
-    const TEST_1:u8 = 60;
-    const TEST_2:u8 = 80;
+    const TEST_1:u8 = 5;
+    const TEST_2:u8 = 19;
 
     #[rustfmt::skip]
-    let mut program = vec![
-      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
-      OpCode::Load.into(), 20, 0, 0, 160, 64,
-      OpCode::Load.into(), 21, 0, 0, 2, 66,
-      OpCode::Load.into(), 22, 0, 0, 128, 64,
-      OpCode::Load.into(), 23, 246, 56, 36, 68,
-      // Copy the four arguments into the function's registers
-      OpCode::Copy.into(), 220, 20,
-      OpCode::Copy.into(), 221, 21,
-      OpCode::Copy.into(), 222, 22,
-      OpCode::Copy.into(), 223, 23,
-      // Call test_1 to test pure register based function calling
-      OpCode::Call.into(), TEST_1,
-      // Move the return value from R220 into R30
-      OpCode::Copy.into(), 30, 220,
-      // Push the arguments for test_2 onto the stack Right to Left
-      OpCode::Push.into(), 23,
-      OpCode::Push.into(), 22,
-      OpCode::Push.into(), 21,
-      OpCode::Push.into(), 20,
-      // Call test_2 to test stackcall
-      OpCode::Call.into(), TEST_2,
-      OpCode::Copy.into(), 31, 250,
-      // Stop the program
-      OpCode::Hlt.into(),
-    ];
-
-    program.resize(TEST_1.into(), OpCode::Noop.into(),);
-
-    // The function being tested is basically:
-    // fn test_1(a,b,c,d) {
-    //    let t1 = a + b;
-    //    let t2 = c + d
-    //    let foo = t1 + t2
-    //    return foo
-    // }
-    #[rustfmt::skip]
-    program.extend_from_slice(&[
+    let program = [
+      // JMP to main 
+      OpCode::Jmp.into(), 77, 0, 0, 0,// main starts on 
+      // FN TEST_1 
+      // Test 1 is basically:
+      // fn test_1(a,b,c,d) {
+      //    let t1 = a + b;
+      //    let t2 = c + d
+      //    let foo = t1 + t2
+      //    return foo
+      // }
+      // 
       // let t1 = a + b
       OpCode::AddRR.into(), 220, 220, 221,
       // let t2 = c + d
@@ -1062,25 +1036,20 @@ mod test {
       OpCode::AddRR.into(), 220, 220, 222,
       // Return
       OpCode::Ret.into(), 0,
-    ]);
-
-    // The function being tested is basically:
-    // PUSH d PUSH c PUSH b PUSH a
-    // fn test_2(a,b,c,d) {
-    //    RMEM 220 STACK[0]
-    //    RMEM 221 STACK[1]
-    //    RMEM 222 STACK[2]
-    //    RMEM 223 STACK[3]
-    //    let t1 = R220 + R221;
-    //    let t2 = R222 + R223
-    //    let foo = t1 + t2
-    //    return foo
-    // }
-
-    program.resize(TEST_2.into(), OpCode::Noop.into(),);
-
-    #[rustfmt::skip]
-    program.extend_from_slice(&[
+      // 
+      // FN TEST_2 
+      // Test 2 is basically
+      // PUSH d PUSH c PUSH b PUSH a
+      // fn test_2(a,b,c,d) {
+      //    RMEM 220 STACK[0]
+      //    RMEM 221 STACK[1]
+      //    RMEM 222 STACK[2]
+      //    RMEM 223 STACK[3]
+      //    let t1 = R220 + R221;
+      //    let t2 = R222 + R223
+      //    let foo = t1 + t2
+      //    return foo
+      // }
       // Read the arguments from the stack there is a by one offset from the SP because the top of the stack holds the return pointer
       OpCode::RMem.into(), 230, SP as u8, 0, 0, 128, 63, 0, 0, 0, 0,
       OpCode::RMem.into(), 231, SP as u8, 0, 0, 0, 64, 0, 0, 0, 0,
@@ -1094,10 +1063,37 @@ mod test {
       OpCode::AddRR.into(), 250, 230, 232,
       // Return the function and pop the arguments off the stack
       OpCode::Ret.into(), 4,
-    ]);
+      //
+      // MAIN
+      //
+      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
+      OpCode::Load.into(), 20, 0, 0, 160, 64,
+      OpCode::Load.into(), 21, 0, 0, 2, 66,
+      OpCode::Load.into(), 22, 0, 0, 128, 64,
+      OpCode::Load.into(), 23, 246, 56, 36, 68,
+      // Copy the four arguments into the function's registers
+      OpCode::Copy.into(), 220, 20,
+      OpCode::Copy.into(), 221, 21,
+      OpCode::Copy.into(), 222, 22,
+      OpCode::Copy.into(), 223, 23,
+      // Call test_1 to test pure register based function calling
+      OpCode::Call.into(), TEST_1, 0, 0, 0, 
+      // Move the return value from R220 into R30
+      OpCode::Copy.into(), 30, 220,
+      // Push the arguments for test_2 onto the stack Right to Left
+      OpCode::Push.into(), 23,
+      OpCode::Push.into(), 22,
+      OpCode::Push.into(), 21,
+      OpCode::Push.into(), 20,
+      // Call test_2 to test stackcall
+      OpCode::Call.into(), TEST_2, 0, 0, 0, 
+      OpCode::Copy.into(), 31, 250,
+      // Stop the program
+      OpCode::Hlt.into(),
+    ];
 
     let mut vm = VM::new();
-    vm.upload(program,);
+    vm.upload(&program,);
     vm.run();
 
     assert_eq!(vm.reg[30].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
