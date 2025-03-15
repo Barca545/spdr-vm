@@ -88,6 +88,21 @@ impl VM {
     vm
   }
 
+  /// Return a reference to the VM's `running` field.
+  pub fn running(&self,) -> &bool {
+    &self.running
+  }
+
+  /// Return a reference to the VM's registers.
+  pub fn reg(&self,) -> &[Memory; REG_COUNT] {
+    &self.reg
+  }
+
+  /// Return a reference to the VM's mem.
+  pub fn mem(&self,) -> &[Memory; MEM_SIZE] {
+    &self.mem
+  }
+
   /// Get an immutable reference to the PC register [`PC`].
   #[inline(always)]
   fn pc(&self,) -> &Memory {
@@ -575,7 +590,7 @@ impl VM {
   #[inline(always)]
   fn call(&mut self,) {
     // Get the function ptr
-    let fn_ptr = self.next_byte() as usize;
+    let fn_ptr = self.next_4_bytes::<u32>();
 
     // Increment the SP (grows downards so subtract one)
     self.stack_inc(1,);
@@ -737,24 +752,41 @@ impl VM {
     self.reg[self.next_byte() as usize] = self.mem[self.sp().as_u32() as usize];
     self.stack_dec(1,);
   }
+}
 
-  // Debugging implementations
+pub const DBG_OPCODES:u8 = 1 << 0;
+pub const DBG_PC:u8 = 1 << 1;
+pub const DBG_REG:u8 = 1 << 2;
+pub const DBG_STACK:u8 = 1 << 3;
+/// Pause after each instruction and wait for user input
+pub const STEP_RUN:u8 = 1 << 7;
 
+// Debugging implementations
+impl VM {
   /// Write each instruction into the provided [writer](Write) before executing
   /// it.
-  pub fn dbg_run<W:Write,>(&mut self, mut w:W,) {
+  pub fn dbg_run<W:Write,>(&mut self, mut w:W, dbg_flag:u8,) {
     self.running = true;
     while self.running {
       let op_byte = self.program[self.pc().as_u32()];
-      let op = OpCode::from_u8(op_byte,).expect(&format!("{}", VMErrors::UnknownOpcode(op_byte, self.pc().as_u32(),)),);
-      write!(w, "{}, ", op).unwrap();
+      let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte, self.pc().as_u32(),),).unwrap();
+      if dbg_flag & DBG_OPCODES != 0 {
+        write!(w, "OpCode: {}, ", op).unwrap();
+      }
+      if dbg_flag & DBG_PC != 0 {
+        write!(w, "PC: {}, ", self.pc().as_u32()).unwrap();
+      }
+      if dbg_flag & DBG_REG != 0 {
+        write!(w, "Regs: {:?}, ", self.reg).unwrap();
+      }
+      if dbg_flag & DBG_STACK != 0 {
+        write!(w, "Stack: {:?}, ", &self.mem[0..20]).unwrap();
+      }
+      if dbg_flag & STEP_RUN != 0 {
+        todo!()
+      }
       self.execute();
     }
-  }
-
-  /// Retrieve the value in a requested register as a [`Memory`] block.
-  pub fn dbg_reg(&self, reg:usize,) -> Memory {
-    self.reg[reg]
   }
 }
 
@@ -764,7 +796,7 @@ mod test {
   use crate::{
     allocator::{POOL_128_SIZE, POOL_16_SIZE, POOL_64_SIZE},
     memory::Slab,
-    vm::{Memory, STACK_SIZE, VM},
+    vm::{Memory, DBG_OPCODES, STACK_SIZE, VM},
   };
   use spdr_isa::{
     opcodes::CmpFlag,
@@ -1263,7 +1295,7 @@ mod test {
     ];
 
     let mut vm = VM::new();
-    vm.upload(program,);
+    vm.upload(&program,);
     vm.run();
 
     // Check the return value is correct
@@ -1296,7 +1328,7 @@ mod test {
 
     vm.upload(program,);
     let mut w = Vec::new();
-    vm.dbg_run(&mut w,);
+    vm.dbg_run(&mut w, DBG_OPCODES,);
 
     assert_eq!(vm.reg[EQ].as_bool(), true);
     assert_eq!(vm.reg[14].as_f32(), 0.0);
@@ -1305,7 +1337,10 @@ mod test {
     assert_eq!(vm.reg[18].as_f32(), 0.0);
     assert_eq!(vm.reg[19].as_f32(), 0.0);
     // Check the correct instructions executed
-    assert_eq!(String::from_utf8(w).unwrap().trim(), "Jmp, Jz, Load, Jnz, Hlt,".to_owned());
+    assert_eq!(
+      String::from_utf8(w).unwrap().trim(),
+      "OpCode: Jmp, OpCode: Jz, OpCode: Load, OpCode: Jnz, OpCode: Hlt,".to_owned()
+    );
   }
 
   #[test]
