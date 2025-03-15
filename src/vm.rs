@@ -1,4 +1,5 @@
 use crate::{
+  allocator::Allocator,
   errors::VMErrors,
   memory::{FromBytes, Memory},
 };
@@ -23,6 +24,7 @@ use std::{any::Any, io::Write};
 /// - Memory with a 20 byte stack.
 /// - Program counter register indexed by [`PC`], a `u32` value.
 /// - Stack pointer register indexed by [`SP`], a `u32` value.
+/// - 16bit address space meaning 254Kb of total memory.
 ///
 /// ## Calling convention
 /// - Caller cleans: The caller is responsible for placing arguments on the
@@ -57,11 +59,10 @@ pub struct VM {
   /// Memory holding 4 bytes per slot.
   ///
   /// The Stack is slots MEM19-MEM0. Grows downwards.
-  mem:[Memory; MEM_SIZE],
+  pub(crate) mem:[Memory; MEM_SIZE],
+  allocator:Allocator,
   /// The currently executing program.
   program:Program,
-  /// Tracks the first free memory address on the heap.
-  free:usize,
   /// External function pointers used for [`OpCode::SysCall`]s.
   externs:Vec<fn(vm:&mut VM, &mut dyn Any,),>,
 }
@@ -72,10 +73,10 @@ impl VM {
       running:false,
       reg:[Memory::new(); REG_COUNT as usize],
       mem:[Memory::new(); MEM_SIZE],
+      allocator:Allocator::new(),
       program:Program::new(),
       // Free starts on the 20th slot in memory because the first 19 are taken
       // up by the stack
-      free:STACK_SIZE,
       externs:Vec::new(),
     };
 
@@ -123,7 +124,7 @@ impl VM {
   /// Helper function to manage decrementing the stack pointer.
   #[inline(always)]
   fn stack_dec(&mut self, amt:u32,) {
-    if self.sp().as_usize() >= STACK_SIZE {
+    if self.sp().as_u32() >= STACK_SIZE as u32 {
       panic!("{}", VMErrors::EmptyStack)
     }
     // Decrement the SP (grows downards so ad one)
@@ -133,7 +134,7 @@ impl VM {
   #[inline(always)]
   /// Helper function to manage incrementing the stack pointer.
   fn stack_inc(&mut self, amt:u32,) {
-    if self.sp().as_usize() == 0 {
+    if self.sp().as_u32() == 0 {
       panic!("{}", VMErrors::StackOverflow)
     }
     // Increment the SP (grows downards so subtract one)
@@ -161,12 +162,12 @@ impl VM {
     *self.pc_mut() = Memory::from(self.pc().as_u32() + 4,);
 
     // Return the bytes
-    T::from(bytes,)
+    T::from_bytes(bytes,)
   }
 
   fn decode(&mut self,) -> OpCode {
     let op_byte = self.program[self.pc().as_u32()];
-    let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte,),).unwrap();
+    let op = OpCode::from_u8(op_byte,).expect(&format!("{}", VMErrors::UnknownOpcode(op_byte, self.pc().as_u32(),)),);
 
     *self.pc_mut() = Memory::from(self.pc().as_u32() + 1,);
     op
@@ -206,6 +207,7 @@ impl VM {
       OpCode::SysCall => self.sys_call(),
       OpCode::Ret => self.ret(),
       OpCode::Alloc => self.alloc(),
+      OpCode::Realloc => self.realloc(),
       OpCode::Dealloc => self.dealloc(),
       OpCode::RMem => self.rmem(),
       OpCode::WMem => self.wmem(),
@@ -247,6 +249,7 @@ impl VM {
       OpCode::SysCall => self.sys_call_with(opaque,),
       OpCode::Ret => self.ret(),
       OpCode::Alloc => self.alloc(),
+      OpCode::Realloc => self.realloc(),
       OpCode::Dealloc => self.dealloc(),
       OpCode::RMem => self.rmem(),
       OpCode::WMem => self.wmem(),
@@ -593,7 +596,7 @@ impl VM {
     self.stack_inc(1,);
 
     // Store the pc of the next instruction (the return site) on the stack
-    self.mem[self.sp().as_usize()] = Memory::from(self.pc().as_u32(),);
+    self.mem[self.sp().as_u32() as usize] = Memory::from(self.pc().as_u32(),);
 
     // Set the pc to the function pointer
     *self.pc_mut() = Memory::from(fn_ptr,);
@@ -622,7 +625,7 @@ impl VM {
     let arg_num = self.next_byte() as u32;
 
     // Set the program counter to the return value popped from the stack
-    *self.pc_mut() = Memory::from(self.mem[self.sp().as_usize()].as_u32(),);
+    *self.pc_mut() = Memory::from(self.mem[self.sp().as_u32() as usize].as_u32(),);
 
     // Decrement the SP (grows downards so add one)
     self.stack_dec(arg_num + 1,);
@@ -631,41 +634,59 @@ impl VM {
   /// Implementation of [`OpCode::Alloc`].
   #[inline(always)]
   fn alloc(&mut self,) {
-    // Store the pointer in the target register
-    self.reg[self.next_byte() as usize] = Memory::from(self.free,);
+    // Get the register where the slab will be stored
+    let reg = self.next_byte() as usize;
 
     // Get the number size of the requested chunk
-    let size = self.reg[self.next_byte() as usize].as_f32() as usize;
+    let size = self.reg[self.next_byte() as usize].as_f32() as u16;
 
     // Update the address of the next free address
-    self.free += size;
+    let slab = self.allocator.alloc(size,);
+
+    // Store the slab in the target register
+    self.reg[reg] = Memory::from(slab,);
+  }
+
+  /// Implementation of [`OpCode::Realloc`].
+  #[inline(always)]
+  fn realloc(&mut self,) {
+    let slab_reg = self.next_byte() as usize;
+    let mut slab = self.reg[slab_reg].as_slab();
+
+    let size = self.reg[self.next_byte() as usize].as_f32() as u16;
+
+    self.allocator.realloc(&mut self.mem, &mut slab, size,);
+
+    self.reg[slab_reg] = Memory::from(slab,);
   }
 
   /// Implementation of [`OpCode::Dealloc`].
-  /// # Warning
-  /// Currently a noop because nothing should deallocate.
   #[inline(always)]
   fn dealloc(&mut self,) {
-    panic!("Deallocation is not implemented yet!")
+    let slab = self.reg[self.next_byte() as usize].as_slab();
+    self.allocator.dealloc(slab,);
   }
 
   /// Implementation of [`OpCode::RMem`].
   #[inline(always)]
   fn rmem(&mut self,) {
+    // Rd: Register the data will be stored
     let target = self.next_byte() as usize;
-    let src = self.next_byte() as usize;
 
-    let pointer = self.reg[src].as_usize();
+    // Register storing the source memory address
+    let slab = self.reg[self.next_byte() as usize].as_slab();
 
     let immediate_offset = self.next_4_bytes::<usize>();
     // Address of the register storing an offset
     // If the address is zero there is no offset.
     // If it is not zero there is a register offset.
     // Zero is used because 0 == REQ which will never store an offset
-    let register_addr = self.next_4_bytes::<usize>();
+    let register_addr = self.next_byte() as usize;
     let register_offset = if register_addr != 0 { self.reg[register_addr].as_f32() } else { 0.0 } as usize;
 
-    let value = self.mem[pointer + immediate_offset + register_offset];
+    let value = self.mem[slab.ptr() + immediate_offset + register_offset];
+
+    dbg!(slab.ptr() + immediate_offset + register_offset);
 
     self.reg[target] = value;
   }
@@ -674,8 +695,9 @@ impl VM {
   #[inline(always)]
   fn wmem(&mut self,) {
     // Get the pointer to a memory address from the register holding it
-    let target = self.reg[self.next_byte() as usize].as_usize();
-    // Get the register holding the data to store.
+    let slab = self.reg[self.next_byte() as usize].as_slab();
+
+    // Get the register holding the pointer (slab owning) to the data to store.
     let src = self.next_byte() as usize;
 
     let immediate_offset = self.next_4_bytes::<usize>();
@@ -683,22 +705,26 @@ impl VM {
     // If the address is zero there is no offset.
     // If it is not zero there is a register offset.
     // Zero is used because 0 == REQ which will never store an offset
-    let register_addr = self.next_4_bytes::<usize>();
+    let register_addr = self.next_byte() as usize;
     let register_offset = if register_addr != 0 { self.reg[register_addr].as_f32() } else { 0.0 } as usize;
-
-    self.mem[(target + immediate_offset + register_offset) as usize] = self.reg[src];
+    dbg!(slab);
+    dbg!(immediate_offset);
+    dbg!(register_addr);
+    dbg!(register_offset);
+    dbg!(slab.ptr() + immediate_offset + register_offset);
+    self.mem[slab.ptr() + immediate_offset + register_offset] = self.reg[src];
   }
 
   /// Implementation of [`OpCode::MemCpy`].
   #[inline(always)]
   fn memcpy(&mut self,) {
     // Get the pointer to the target memory address from the register holding it
-    let target = self.reg[self.next_byte() as usize].as_f32() as usize;
+    let dst = self.reg[self.next_byte() as usize].as_slab();
 
     // Get the pointer to a memory address from the register holding it
-    let src = self.reg[self.next_byte() as usize].as_f32() as usize;
+    let src = self.reg[self.next_byte() as usize].as_slab();
 
-    self.mem[target] = self.mem[src]
+    self.mem[dst.ptr()] = self.mem[src.ptr()]
   }
 
   /// Implementation of [`OpCode::Push`].
@@ -709,7 +735,7 @@ impl VM {
     self.stack_inc(1,);
 
     // Place the value into the stack
-    self.mem[self.sp().as_usize()] = val;
+    self.mem[self.sp().as_u32() as usize] = val;
   }
 
   /// Implementation of [`OpCode::Pop`].
@@ -723,7 +749,7 @@ impl VM {
   fn vm_pop_r(&mut self,) {
     // Place the value in the current slot the SP points to into the return
     // register
-    self.reg[self.next_byte() as usize] = self.mem[self.sp().as_usize()];
+    self.reg[self.next_byte() as usize] = self.mem[self.sp().as_u32() as usize];
     self.stack_dec(1,);
   }
 }
@@ -743,7 +769,7 @@ impl VM {
     self.running = true;
     while self.running {
       let op_byte = self.program[self.pc().as_u32()];
-      let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte,),).unwrap();
+      let op = OpCode::from_u8(op_byte,).ok_or(VMErrors::UnknownOpcode(op_byte, self.pc().as_u32(),),).unwrap();
       if dbg_flag & DBG_OPCODES != 0 {
         write!(w, "OpCode: {}, ", op).unwrap();
       }
@@ -767,12 +793,22 @@ impl VM {
 #[cfg(test)]
 mod test {
   use super::OpCode;
-  use crate::vm::{Memory, DBG_OPCODES, STACK_SIZE, VM};
+  use crate::{
+    allocator::{POOL_128_SIZE, POOL_16_SIZE, POOL_64_SIZE},
+    memory::Slab,
+    vm::{Memory, DBG_OPCODES, STACK_SIZE, VM},
+  };
   use spdr_isa::{
     opcodes::CmpFlag,
     registers::{EQ, SP},
   };
   use std::{any::Any, cell::RefCell, rc::Rc};
+
+  // Use these for the memory tests
+  const OFFSET_16:u16 = 0;
+  const OFFSET_64:u16 = OFFSET_16 + POOL_16_SIZE;
+  const OFFSET_128:u16 = OFFSET_64 + POOL_64_SIZE;
+  const OFFSET_256:u16 = OFFSET_128 + POOL_128_SIZE;
 
   #[test]
   fn test_add_instructions() {
@@ -883,7 +919,7 @@ mod test {
   #[test]
   fn test_pow_instructions() {
     #[rustfmt::skip]
-    let program = vec![
+    let program = [
       // Load 15 into R10
       OpCode::Load.into(), 10, 0, 0, 112, 65,
       // Raise R10 to the 10 power together and store in R20
@@ -911,7 +947,7 @@ mod test {
   #[test]
   fn test_eq_and_not_instructions() {
     #[rustfmt::skip]
-    let program = vec![
+    let program = [
       // Load 15 into R20
       OpCode::Load.into(), 20, 0, 0, 112, 65,
       // Compare R20 and 10
@@ -942,10 +978,10 @@ mod test {
   }
 
   #[test]
-  fn alloc_write_read_instructions() {
+  fn test_allocation() {
     #[rustfmt::skip]
     // for some reason the value in R40 is overwriting the wrong mem cell
-    let program = vec![
+    let program = [
       // Load 4 into R10
       OpCode::Load.into(), 10, 0, 0, 128, 64,
       // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
@@ -953,81 +989,213 @@ mod test {
       OpCode::Load.into(), 30, 0, 0, 2, 66,
       OpCode::Load.into(), 40, 0, 0, 128, 64,
       OpCode::Load.into(), 50, 246, 56, 36, 68,
-      // Alloc space for a 4 byte array and store its pointer in R60
+      // Alloc space for a array the size of the value in R10 (4 cells) and store its pointer in R60
       OpCode::Alloc.into(), 60, 10,
-      // Write memory in R30, R40, and R50 into the allocated block
-      // Test works with no offset
-      OpCode::WMem.into(), 60, 20, 0, 0, 0, 0, 0, 0, 0, 0,
-      // Test works with immediate offset of 1
-      OpCode::WMem.into(), 60, 30, 0, 0, 128, 63, 0, 0, 0, 0,
-      // Store 2 in R70
-      OpCode::Load.into(), 70, 0, 0, 0, 64,
-      // Test works with register offset of 2 which is stored in R70
-      OpCode::WMem.into(), 60, 40, 0, 0, 0, 0, 0, 0, 140, 66,
-      // Test works with an immediate offset of 2 and register offset of 1 
-      OpCode::Load.into(), 80, 0, 0, 128, 63,
-      OpCode::WMem.into(), 60, 50, 0, 0, 0, 64, 0, 0, 160, 66,
-      // Copy the mem[22] to mem[39] 
-      OpCode::Load.into(), 200, 0, 0, 176, 65,
-      OpCode::Load.into(), 201, 0, 0, 28, 66,
-      OpCode::MemCpy.into(), 201, 200,
-      // Read the memory from mem[22] into R203 
-      OpCode::RMem.into(), 203, 60, 0, 0, 0, 64, 0, 0, 0, 0,
       // Stop the program
       OpCode::Hlt.into(),
     ];
 
     let mut vm = VM::new();
-
     vm.upload(program,);
-
     vm.run();
 
-    // Check the VM updates the next free mem addr
-    assert_eq!(vm.free, STACK_SIZE + 4);
+    // Check Alloc actually leads to a slab being stored
+    assert_eq!(vm.reg[60].as_slab(), Slab::new_with_meta_offset(0, 16));
+  }
+
+  #[test]
+  fn test_reallocation() {
+    #[rustfmt::skip]
+    // for some reason the value in R40 is overwriting the wrong mem cell
+    let program = vec![
+      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
+      OpCode::Load.into(), 20, 0, 0, 160, 64,
+      // Load 4 into R10, this will be the size of the requested allocation
+      OpCode::Load.into(), 10, 0, 0, 128, 64,
+      // Alloc space for a array the size of the value in R10 (4 cells) and store its pointer in R60
+      OpCode::Alloc.into(), 60, 10,
+      // Load 200 into R200, this will be the size of the requested allocation
+      OpCode::Load.into(), 200, 0, 0, 72, 67,
+      // Realloc space for a array the size of the value in R200 (200 cells) and store its pointer in R80
+      OpCode::Realloc.into(), 80, 200,
+      // Stop the program
+      OpCode::Hlt.into(),
+    ];
+
+    let mut vm = VM::new();
+    vm.upload(program,);
+    vm.run();
+
+    // Confirm Alloc actually leads to a slab being stored
+    assert_eq!(vm.reg[60].as_slab(), Slab::new_with_meta_offset(0, 16));
+
+    let offset = POOL_16_SIZE + POOL_64_SIZE + POOL_128_SIZE;
+    // Confirm Realloc actually leads to a slab being stored
+    assert_eq!(vm.reg[80].as_slab(), Slab::new_with_meta_offset(offset, 256));
+  }
+
+  #[test]
+  fn test_deallocation() {
+    #[rustfmt::skip]
+    // for some reason the value in R40 is overwriting the wrong mem cell
+    let program = vec![
+      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
+      OpCode::Load.into(), 20, 0, 0, 160, 64,
+      // Load 4 into R10, this will be the size of the requested allocation
+      OpCode::Load.into(), 10, 0, 0, 128, 64,
+      // Alloc space for a array the size of the value in R10 (4 cells) and store its pointer in R60
+      OpCode::Alloc.into(), 60, 10,
+      // Deallocate the slab stored in R60
+      OpCode::Dealloc.into(), 60,
+      OpCode::Hlt.into(),
+    ];
+
+    let mut vm = VM::new();
+    vm.upload(program,);
+    vm.run();
+
+    // Confirm Alloc actually leads to a slab being stored
+    assert_eq!(vm.reg[60].as_slab(), Slab::new_with_meta_offset(0, 16));
+    // Confirm the deallocation results in a pool of the correct length
+    assert_eq!(vm.allocator.pools()[0].clone().inner().len() - 1, POOL_16_SIZE as usize / 16);
+  }
+
+  #[test]
+  fn test_wmem() {
+    #[rustfmt::skip]
+    let program = [
+      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
+      OpCode::Load.into(), 20, 0, 0, 160, 64,
+      OpCode::Load.into(), 30, 0, 0, 2, 66,
+      OpCode::Load.into(), 40, 0, 0, 128, 64,
+      OpCode::Load.into(), 50, 246, 56, 36, 68,
+      // Load 4 into R10
+      OpCode::Load.into(), 10, 0, 0, 72, 67,
+      // Alloc space for a array the size of the value in R10 (4 cells) and store its pointer in R60
+      OpCode::Alloc.into(), 60, 10, 
+      // Write memory in R30, R40, and R50 into the allocated block
+      // Test works with no offset
+      OpCode::WMem.into(), 60, 20, 0, 0, 0, 0, 0,
+      // Test works with immediate offset of 1
+      OpCode::WMem.into(), 60, 30, 0, 0, 128, 63, 0,
+      // Store 2 in R70
+      OpCode::Load.into(), 70, 0, 0, 0, 64,
+      // Test works with register offset of 2 which is stored in R70
+      OpCode::WMem.into(), 60, 40, 0, 0, 0, 0, 70,
+      // Test works with an immediate offset of 2 and register offset of 1 
+      OpCode::Load.into(), 80, 0, 0, 128, 63,
+      OpCode::WMem.into(), 60, 50, 0, 0, 0, 64, 80,
+      OpCode::Hlt.into(),
+    ];
+
+    let mut vm = VM::new();
+    vm.upload(program,);
+    vm.run();
+
     // Check the loads store the proper values
     assert_eq!(vm.reg[20].as_f32(), 5.0);
     assert_eq!(vm.reg[30].as_f32(), 32.5);
     assert_eq!(vm.reg[40].as_f32(), 4.0);
     assert_eq!(vm.reg[50].as_f32(), 656.89);
-    // Check the values are moved from registers into the "array"
-    assert_eq!(
-      [5.0, 32.5, 4.0, 656.89],
-      [
-        vm.mem[STACK_SIZE].as_f32(),
-        vm.mem[STACK_SIZE + 1].as_f32(),
-        vm.mem[STACK_SIZE + 2].as_f32(),
-        vm.mem[STACK_SIZE + 3].as_f32()
-      ]
-    );
-    // Check nothing interfered with the EQ check
-    assert_eq!(vm.reg[EQ].as_usize(), 0);
-    // Check MemCpy copies from mem[22] to mem[39]
-    assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), 4.0);
-    assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), vm.mem[39].as_f32());
-    // Check RMem reads from mem[22] into reg[203]
-    assert_eq!(vm.mem[STACK_SIZE + 2], vm.reg[203]);
+
+    // Check the values are written from registers into the "array"
+    // Have to use the OFFSET_256 because the requested slab is 200 cells
+    assert_eq!(vm.mem[STACK_SIZE + OFFSET_256 as usize].as_f32(), 5.0);
+    assert_eq!(vm.mem[STACK_SIZE + OFFSET_256 as usize + 1].as_f32(), 32.5,);
+    assert_eq!(vm.mem[STACK_SIZE + OFFSET_256 as usize + 2].as_f32(), 4.0);
+    assert_eq!(vm.mem[STACK_SIZE + OFFSET_256 as usize + 3].as_f32(), 656.89);
   }
 
   #[test]
-  fn push_pop_call_return() {
-    // Location of test 1 in memory
-    const TEST_1:u8 = 5;
-    const TEST_2:u8 = 19;
+  fn test_rmem() {
+    let mut vm = VM::new();
+    // Load values into mem[20-23]
+    vm.mem[20] = Memory::from(30.0,);
+    vm.mem[21] = Memory::from(31.0,);
+    vm.mem[22] = Memory::from(32.0,);
+    vm.mem[23] = Memory::from(33.0,);
 
     #[rustfmt::skip]
     let program = [
-      // JMP to main 
-      OpCode::Jmp.into(), 77, 0, 0, 0,// main starts on 
-      // FN TEST_1 
-      // Test 1 is basically:
-      // fn test_1(a,b,c,d) {
-      //    let t1 = a + b;
-      //    let t2 = c + d
-      //    let foo = t1 + t2
-      //    return foo
-      // }
-      // 
+    // Get an allocation for 4 bytes and store it in R200
+    OpCode::Load.into(), 50, 0, 0, 0, 64,
+    OpCode::Alloc.into(), 27, 50,
+    // Read the memory from mem[20] into R200
+    OpCode::RMem.into(), 200, 27, 0, 0, 0, 0, 0,
+    // Read the memory from mem[20 + I0] into R200 I0 = 1
+    OpCode::RMem.into(), 201, 27, 0, 0, 128, 63, 0, 
+    // Read the memory from mem[20 + R0] into R200: R0 = 51 = 3
+    OpCode::Load.into(), 51, 0, 0, 0, 64, // 3 in LE bytes
+    OpCode::RMem.into(), 202, 27, 0, 0, 0, 0, 51,
+    // Read the memory from mem[20 + I0 + R0] into R200: R0 = 51 = 3, I0 = 1
+    OpCode::RMem.into(), 203, 27, 0, 0, 128, 63, 51,
+    OpCode::Hlt.into(),
+    ];
+
+    vm.upload(program,);
+    vm.run();
+
+    assert_eq!(vm.reg[200].as_f32(), 30.0);
+    assert_eq!(vm.reg[201].as_f32(), 31.0);
+    assert_eq!(vm.reg[202].as_f32(), 32.0);
+    assert_eq!(vm.reg[203].as_f32(), 33.0);
+  }
+
+  #[test]
+  fn test_memcpy() {
+    let src = Memory::from(Slab::new_as_pointer(22,),);
+    let dst = Memory::from(Slab::new_as_pointer(39,),);
+
+    let mut vm = VM::new();
+    // Load 4 into mem[22]
+    vm.mem[22] = Memory::from(4.0,);
+
+    #[rustfmt::skip]
+    let program = [
+    // Copy mem[22] to mem[39] 
+    OpCode::Load.into(), 200, src[0], src[1], src[2], src[3], // This is the pointer to 22  
+    OpCode::Load.into(), 201, dst[0], dst[1], dst[2], dst[3], // This is the pointer to 39
+    OpCode::MemCpy.into(), 201, 200,
+    OpCode::Hlt.into(),
+    ];
+
+    vm.upload(program,);
+    vm.run();
+
+    // Check the pointers are stored correctly
+    assert_eq!(vm.reg[200].as_slab(), Slab::new_as_pointer(22,));
+    assert_eq!(vm.reg[201].as_slab(), Slab::new_as_pointer(39,));
+
+    // Check MemCpy copies from mem[22] to mem[39]
+    assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), 4.0);
+    assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), vm.mem[39].as_f32());
+  }
+
+  // TODO: WMEM and RMEM are broken because they do not work with a slab pointer
+  // I either need to fix this so the ptr method does not need to add 20 or make
+  // everything else compensate for this
+  #[test]
+  fn call_fn_using_regs() {
+    // Address of the test function's beginning
+    const TEST_1:u8 = 5;
+
+    // Args for the function as Memory
+    let a = Memory(5f32.to_le_bytes(),);
+    let b = Memory(4f32.to_le_bytes(),);
+    let c = Memory(32.5f32.to_le_bytes(),);
+    let d = Memory(656.89f32.to_le_bytes(),);
+    // TEST FUNCTION is basically:
+    fn test_fn(a:f32, b:f32, c:f32, d:f32,) -> f32 {
+      let t1 = a + b;
+      let t2 = c + d;
+      t1 + t2
+    }
+
+    #[rustfmt::skip]
+    let program = [
+      // Jump to main at 19
+      OpCode::Jmp.into(), 19, 0, 0, 0,
+      // TEST FUNCTION 
       // let t1 = a + b
       OpCode::AddRR.into(), 220, 220, 221,
       // let t2 = c + d
@@ -1036,58 +1204,92 @@ mod test {
       OpCode::AddRR.into(), 220, 220, 222,
       // Return
       OpCode::Ret.into(), 0,
-      // 
-      // FN TEST_2 
-      // Test 2 is basically
-      // PUSH d PUSH c PUSH b PUSH a
-      // fn test_2(a,b,c,d) {
-      //    RMEM 220 STACK[0]
-      //    RMEM 221 STACK[1]
-      //    RMEM 222 STACK[2]
-      //    RMEM 223 STACK[3]
-      //    let t1 = R220 + R221;
-      //    let t2 = R222 + R223
-      //    let foo = t1 + t2
-      //    return foo
-      // }
-      // Read the arguments from the stack there is a by one offset from the SP because the top of the stack holds the return pointer
-      OpCode::RMem.into(), 230, SP as u8, 0, 0, 128, 63, 0, 0, 0, 0,
-      OpCode::RMem.into(), 231, SP as u8, 0, 0, 0, 64, 0, 0, 0, 0,
-      OpCode::RMem.into(), 232, SP as u8, 0, 0, 64, 64, 0, 0, 0, 0,
-      OpCode::RMem.into(), 233, SP as u8, 0, 0, 128, 64, 0, 0, 0, 0,
-      // let t1 = a + b
-      OpCode::AddRR.into(), 230, 230, 231,
-      // let t2 = c + d
-      OpCode::AddRR.into(), 232, 232, 233,
-      // // let foo = t1 + t2
-      OpCode::AddRR.into(), 250, 230, 232,
-      // Return the function and pop the arguments off the stack
-      OpCode::Ret.into(), 4,
-      //
-      // MAIN
-      //
-      // Load 5.0 into R20, 32.5 into R30, 4.0 into R40, and 656.89 into R50
-      OpCode::Load.into(), 20, 0, 0, 160, 64,
-      OpCode::Load.into(), 21, 0, 0, 2, 66,
-      OpCode::Load.into(), 22, 0, 0, 128, 64,
-      OpCode::Load.into(), 23, 246, 56, 36, 68,
+
+      // Beginning of MAIN
+
+      // Load 5.0 into R20
+      OpCode::Load.into(), 20, a[0], a[1], a[2], a[3],
+      // Load 32.5 into R21
+      OpCode::Load.into(), 21, b[0], b[1], b[2], b[3],
+      // Load 4.0 into R22 
+      OpCode::Load.into(), 22, c[0], c[1], c[2], c[3],
+      // Load 656.89 into R23
+      OpCode::Load.into(), 23, d[0], d[1], d[2], d[3],
       // Copy the four arguments into the function's registers
       OpCode::Copy.into(), 220, 20,
       OpCode::Copy.into(), 221, 21,
       OpCode::Copy.into(), 222, 22,
       OpCode::Copy.into(), 223, 23,
       // Call test_1 to test pure register based function calling
-      OpCode::Call.into(), TEST_1, 0, 0, 0, 
+      OpCode::Call.into(), TEST_1,
       // Move the return value from R220 into R30
       OpCode::Copy.into(), 30, 220,
-      // Push the arguments for test_2 onto the stack Right to Left
+      OpCode::Hlt.into(),
+    ];
+
+    let mut vm = VM::new();
+    vm.upload(program,);
+    vm.run();
+
+    assert_eq!(vm.reg[30].as_f32(), test_fn(a.as_f32(), b.as_f32(), c.as_f32(), d.as_f32()));
+  }
+
+  #[test]
+  fn call_fn_using_stack() {
+    // Address of the test function's beginning
+    const TEST_2:u8 = 5;
+
+    // Args for the function as Memory
+    let a = Memory(5f32.to_le_bytes(),);
+    let b = Memory(4f32.to_le_bytes(),);
+    let c = Memory(32.5f32.to_le_bytes(),);
+    let d = Memory(656.89f32.to_le_bytes(),);
+    // TEST FUNCTION is basically:
+    fn test_fn(a:f32, b:f32, c:f32, d:f32,) -> f32 {
+      let t1 = a + b;
+      let t2 = c + d;
+      t1 + t2
+    }
+
+    #[rustfmt::skip]
+    let program = [
+      // Jump to main at 51
+      OpCode::Jmp.into(), 51, 0, 0, 0,
+      // TEST FUNCTION 
+      // Read the arguments from the stack 
+      // There is a by one offset from the SP because the top of the stack holds the return pointer
+      OpCode::RMem.into(), 230, SP as u8, 0, 0, 128, 63, 0,
+      OpCode::RMem.into(), 231, SP as u8, 0, 0, 0, 64, 0, 
+      OpCode::RMem.into(), 232, SP as u8, 0, 0, 64, 64, 0,
+      OpCode::RMem.into(), 233, SP as u8, 0, 0, 128, 64, 0,   
+      // let t1 = a + b
+      OpCode::AddRR.into(), 230, 230, 231,
+      // let t2 = c + d
+      OpCode::AddRR.into(), 232, 232, 233,
+      // // let foo = t1 + t2
+      OpCode::AddRR.into(), 230, 230, 232,
+      // Return the function and pop the arguments off the stack
+      OpCode::Ret.into(), 4,
+
+      // START OF MAIN
+
+      // Load 5.0 into R20
+      OpCode::Load.into(), 20, a[0], a[1], a[2], a[3],
+      // Load 32.5 into R21
+      OpCode::Load.into(), 21, b[0], b[1], b[2], b[3],
+      // Load 4.0 into R22 
+      OpCode::Load.into(), 22, c[0], c[1], c[2], c[3],
+      // Load 656.89 into R23
+      OpCode::Load.into(), 23, d[0], d[1], d[2], d[3],
+
+      // Push the arguments for TEST FUNCTION onto the stack Right to Left
       OpCode::Push.into(), 23,
       OpCode::Push.into(), 22,
       OpCode::Push.into(), 21,
       OpCode::Push.into(), 20,
       // Call test_2 to test stackcall
-      OpCode::Call.into(), TEST_2, 0, 0, 0, 
-      OpCode::Copy.into(), 31, 250,
+      OpCode::Call.into(), TEST_2,
+      OpCode::Copy.into(), 30, 230,
       // Stop the program
       OpCode::Hlt.into(),
     ];
@@ -1096,9 +1298,10 @@ mod test {
     vm.upload(&program,);
     vm.run();
 
-    assert_eq!(vm.reg[30].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
-    assert_eq!(vm.reg[31].as_f32(), 5.0 + 32.5 + 4.0 + 656.89);
-    assert_eq!(vm.reg[SP].as_usize(), 20);
+    // Check the return value is correct
+    assert_eq!(vm.reg[30].as_f32(), test_fn(a.as_f32(), b.as_f32(), c.as_f32(), d.as_f32()));
+    // Check the stack pointer is correct
+    assert_eq!(vm.reg[SP].as_u32() as usize, 20);
   }
 
   #[test]
@@ -1154,10 +1357,10 @@ mod test {
 
     fn test_1_wrapper(vm:&mut VM, data:&mut dyn Any,) {
       // Get the value to add from the top of the stack
-      let add = vm.mem[vm.sp().as_usize()].as_f32();
+      let add = vm.mem[vm.sp().as_u32() as usize].as_f32();
 
       // Get the value to sub from the top of the stack
-      let sub = vm.mem[vm.sp().as_usize() + 1].as_f32();
+      let sub = vm.mem[vm.sp().as_u32() as usize + 1].as_f32();
 
       // Convert the external data to the external function's expected type.
       let data = data.downcast_mut::<Opaque>().unwrap();
@@ -1168,7 +1371,7 @@ mod test {
       // Get increment the SP to the next open slot
       vm.stack_inc(1,);
       // Place the return in the slot
-      vm.mem[vm.sp().as_usize()] = Memory(ret.to_le_bytes(),);
+      vm.mem[vm.sp().as_u32() as usize] = Memory(ret.to_le_bytes(),);
     }
 
     fn test_2(data:&mut Opaque, add:f32, push_val:f32,) {
@@ -1181,10 +1384,10 @@ mod test {
 
     fn test_2_wrapper(vm:&mut VM, data:&mut dyn Any,) {
       // Get the value to add from the top of the stack
-      let add = vm.mem[vm.sp().as_usize()].as_f32();
+      let add = vm.mem[vm.sp().as_u32() as usize].as_f32();
 
       // Get the value to sub from the top of the stack
-      let push_val = vm.mem[vm.sp().as_usize() + 1].as_f32();
+      let push_val = vm.mem[vm.sp().as_u32() as usize + 1].as_f32();
 
       // Convert the external data to the external function's expected type.
       let data = data.downcast_mut::<Opaque>().unwrap();
@@ -1240,12 +1443,12 @@ mod test {
 
     assert_eq!(vm.reg[3].as_f32(), 90.0 + 32.5 - 5.0);
     assert_eq!(*opaque.hard_to_reach.borrow(), vec![13 + 15, 99, 45, 5]);
-    assert_eq!(vm.sp().as_usize(), 20);
+    assert_eq!(vm.sp().as_u32() as usize, 20);
   }
 
   #[test]
   #[should_panic(expected = "EMPTY STACK: Tried to remove a value from the stack when the stack was empty.")]
-  fn panics_on_underflow() {
+  fn panics_on_stack_underflow() {
     // Test Underflow
     let underflow = vec![OpCode::Pop.into()];
 
@@ -1257,7 +1460,7 @@ mod test {
 
   #[test]
   #[should_panic(expected = "STACK OVERFLOW: Tried to add a value to the stack when the stack was full.")]
-  fn panics_on_overflow() {
+  fn panics_on_stack_overflow() {
     // Test OverFlow
     #[rustfmt::skip]
     let overflow = vec![
