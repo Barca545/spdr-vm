@@ -590,7 +590,7 @@ impl VM {
   #[inline(always)]
   fn call(&mut self,) {
     // Get the function ptr
-    let fn_ptr = self.next_4_bytes::<u32>();
+    let fn_ptr = self.next_byte() as usize;
 
     // Increment the SP (grows downards so subtract one)
     self.stack_inc(1,);
@@ -671,7 +671,7 @@ impl VM {
   #[inline(always)]
   fn rmem(&mut self,) {
     // Rd: Register the data will be stored
-    let target = self.next_byte() as usize;
+    let dst = self.next_byte() as usize;
 
     // Register storing the source memory address
     let slab = self.reg[self.next_byte() as usize].as_slab();
@@ -680,15 +680,13 @@ impl VM {
     // Address of the register storing an offset
     // If the address is zero there is no offset.
     // If it is not zero there is a register offset.
-    // Zero is used because 0 == REQ which will never store an offset
+    // Zero is used because R0 will never store an offset
     let register_addr = self.next_byte() as usize;
     let register_offset = if register_addr != 0 { self.reg[register_addr].as_f32() } else { 0.0 } as usize;
 
     let value = self.mem[slab.ptr() + immediate_offset + register_offset];
 
-    dbg!(slab.ptr() + immediate_offset + register_offset);
-
-    self.reg[target] = value;
+    self.reg[dst] = value;
   }
 
   /// Implementation of [`OpCode::WMem`].
@@ -704,14 +702,9 @@ impl VM {
     // Address of the register storing an offset
     // If the address is zero there is no offset.
     // If it is not zero there is a register offset.
-    // Zero is used because 0 == REQ which will never store an offset
+    // Zero is used because R0 will never store an offset
     let register_addr = self.next_byte() as usize;
     let register_offset = if register_addr != 0 { self.reg[register_addr].as_f32() } else { 0.0 } as usize;
-    dbg!(slab);
-    dbg!(immediate_offset);
-    dbg!(register_addr);
-    dbg!(register_offset);
-    dbg!(slab.ptr() + immediate_offset + register_offset);
     self.mem[slab.ptr() + immediate_offset + register_offset] = self.reg[src];
   }
 
