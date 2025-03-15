@@ -9,26 +9,26 @@ use crate::memory::{Memory, Slab};
 //   risk they might allocate multiple times.
 
 /// Amount of [`Memory`] cells each [`Slab`] in the [`Allocator] owns.
-const SLAB_SIZES:[u16; 4] = [16, 64, 128, 256,];
+pub(crate) const SLAB_SIZES:[u16; 4] = [16, 64, 128, 256,];
 
 /// Number of [`Slab`]s in the [`Pool`] containing `Slab`s which own 16
 /// [`Memory`] cells.
-const POOL_16_SIZE:u16 = u16::MAX / 4;
+pub(crate) const POOL_16_SIZE:u16 = u16::MAX / 4;
 
 /// Number of [`Slab`]s in the [`Pool`] containing `Slab`s which own 64
 /// [`Memory`] cells.
-const POOL_64_SIZE:u16 = u16::MAX / 2;
+pub(crate) const POOL_64_SIZE:u16 = u16::MAX / 2;
 
 /// Number of [`Slab`]s in the [`Pool`] containing `Slab`s which own 128
 /// [`Memory`] cells.
-const POOL_128_SIZE:u16 = u16::MAX / 8;
+pub(crate) const POOL_128_SIZE:u16 = u16::MAX / 8;
 
 /// Number of [`Slab`]s in the [`Pool`] containing `Slab`s which own 256
 /// [`Memory`] cells.
-const POOL_256_SIZE:u16 = u16::MAX / 8;
+pub(crate) const POOL_256_SIZE:u16 = u16::MAX / 8;
 
-#[derive(Debug,)]
-struct Pool {
+#[derive(Debug, Clone,)]
+pub(crate) struct Pool {
   // TODO: I don't love using a vector instead of some sort of statically generated array
   // TODO: Ideally this could eventually be stored in the VM memory itself as a linked list or something
   inner:Vec<Slab,>,
@@ -46,7 +46,7 @@ impl Pool {
     // index a public function and use it here
     let mut inner = Vec::with_capacity((POOL_SIZE / CELL_SIZE) as usize,);
     for addr in (*pool_offset..POOL_SIZE + *pool_offset).step_by(CELL_SIZE as usize,).rev() {
-      inner.push(Slab { addr, metadata:CELL_SIZE, },);
+      inner.push(Slab::new_with_meta_offset(addr, CELL_SIZE,),);
     }
 
     // Add the new ammount the offset
@@ -62,6 +62,11 @@ impl Pool {
 
   fn push(&mut self, ptr:Slab,) {
     self.inner.push(ptr,);
+  }
+
+  #[cfg(test)]
+  pub fn inner(&self,) -> Vec<Slab,> {
+    self.inner.clone()
   }
 }
 
@@ -111,7 +116,7 @@ impl Allocator {
   }
 
   /// Move an existing allocation to a new [`Slab`] of [`Memory`].
-  fn realloc(&mut self, mem:&mut [Memory], slab:&mut Slab, requested_size:u16,) {
+  pub fn realloc(&mut self, mem:&mut [Memory], slab:&mut Slab, requested_size:u16,) {
     // Get a new slab
     let new_slab = self.alloc(requested_size,);
 
@@ -126,13 +131,19 @@ impl Allocator {
 
   /// Deallocate a [`Slab`]. Add it back to its [`Pool`] so it can be reused.
   pub fn dealloc(&mut self, slab:Slab,) {
-    let idx = self.get_slab_index(slab.metadata,).unwrap();
+    let idx = self.get_slab_index(slab.size() as u16,).unwrap();
     self.pools[idx].push(slab,);
   }
 
   /// Returns the index in [`SLAB_SIZES`] corresponding to the smallest [slab](https://en.wikipedia.org/wiki/Memory_pool) which can fit the requested allocation.
   fn get_slab_index(&self, requested_size:u16,) -> Option<usize,> {
     SLAB_SIZES.iter().position(|s| *s >= requested_size,)
+  }
+
+  #[cfg(test)]
+  /// A function for accessing the private inner field of pools during testing.
+  pub fn pools(&self,) -> [Pool; SLAB_SIZES.len()] {
+    self.pools.clone()
   }
 }
 
@@ -192,9 +203,9 @@ mod test {
     let slab_2 = a.alloc(14,);
     let slab_3 = a.alloc(1,);
 
-    assert_eq!(slab_1, Slab { addr:0, metadata:16 });
-    assert_eq!(slab_2, Slab { addr:16, metadata:16 });
-    assert_eq!(slab_3, Slab { addr:32, metadata:16 });
+    assert_eq!(slab_1, Slab::new_with_meta_offset(0, 16));
+    assert_eq!(slab_2, Slab::new_with_meta_offset(16, 16));
+    assert_eq!(slab_3, Slab::new_with_meta_offset(32, 16));
   }
 
   // Try to get 2 slabs of differing sizes
@@ -208,10 +219,10 @@ mod test {
     let slab_4 = a.alloc(247,);
 
     // Check the correct slabs have been allocated
-    assert_eq!(slab_1, Slab { addr:OFFSET_16, metadata:16 });
-    assert_eq!(slab_2, Slab { addr:OFFSET_64, metadata:64 });
-    assert_eq!(slab_3, Slab { addr:OFFSET_128, metadata:128 });
-    assert_eq!(slab_4, Slab { addr:OFFSET_256, metadata:256 });
+    assert_eq!(slab_1, Slab::new_with_meta_offset(OFFSET_16, 16));
+    assert_eq!(slab_2, Slab::new_with_meta_offset(OFFSET_64, 64));
+    assert_eq!(slab_3, Slab::new_with_meta_offset(OFFSET_128, 128));
+    assert_eq!(slab_4, Slab::new_with_meta_offset(OFFSET_256, 256));
   }
 
   // Allocate 1 slabs from each pool to ensure they're removed
@@ -241,6 +252,14 @@ mod test {
     a.dealloc(slab_1,);
 
     assert_eq!(a.pools[1].inner.last(), Some(&slab_1));
+    assert_eq!(a.pools[1].inner.len() - 1, POOL_64_SIZE as usize / 64);
+  }
+
+  #[test]
+  fn bits() {
+    dbg!(u8::MAX.to_le_bytes());
+    dbg!(u8::MAX);
+    dbg!(u16::MAX);
   }
 
   #[test]
@@ -251,7 +270,7 @@ mod test {
     let mut slab = a.alloc(10,);
 
     // Confirm slab is correct
-    assert_eq!(slab, Slab { addr:0, metadata:16 });
+    assert_eq!(slab, Slab::new_with_meta_offset(0, 16));
 
     // Add data to the allocation
     vm.mem[slab.ptr()..slab.ptr() + 16].copy_from_slice(&[Memory(32.0f32.to_le_bytes(),); 16],);
@@ -260,7 +279,7 @@ mod test {
     a.realloc(&mut vm.mem, &mut slab, 200,);
 
     // Confirm slab changed
-    assert_eq!(slab, Slab { addr:OFFSET_256, metadata:256 });
+    assert_eq!(slab, Slab::new_with_meta_offset(OFFSET_256, 256));
 
     // Confirm the new slab's allocation contains the correct, data
     assert_eq!(vm.mem[slab.ptr()..slab.ptr() + 16], [Memory(32.0f32.to_le_bytes(),); 16]);
