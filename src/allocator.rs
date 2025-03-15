@@ -55,11 +55,12 @@ impl Pool {
     Pool { inner, }
   }
 
-  /// Returns a [`Slab`] to the next free slab of the requested size.
+  /// Return the next free [`Slab`] in the `Pool`.
   fn pop(&mut self,) -> Option<Slab,> {
     self.inner.pop()
   }
 
+  /// Place a [`Slab`] at the front of the `Pool`.
   fn push(&mut self, ptr:Slab,) {
     self.inner.push(ptr,);
   }
