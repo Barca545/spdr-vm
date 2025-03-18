@@ -107,7 +107,7 @@ impl VM {
 
   /// Get an immutable reference to the PC register [`PC`].
   #[inline(always)]
-  fn pc(&self,) -> &Memory {
+  pub fn pc(&self,) -> &Memory {
     &self.reg[PC]
   }
 
@@ -119,7 +119,7 @@ impl VM {
 
   /// Get an immutable reference to the SP register [`SP`].
   #[inline(always)]
-  fn sp(&self,) -> &Memory {
+  pub fn sp(&self,) -> &Memory {
     &self.reg[SP]
   }
 
