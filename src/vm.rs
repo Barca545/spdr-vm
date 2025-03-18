@@ -3,6 +3,7 @@ use crate::{
   errors::VMErrors,
   memory::{FromBytes, Memory},
 };
+use eyre::Result;
 use num_traits::FromPrimitive;
 use spdr_isa::{
   memory::{MEM_SIZE, STACK_SIZE},
@@ -24,6 +25,7 @@ use std::{any::Any, io::Write};
 /// - Memory with a 20 byte stack.
 /// - Program counter register indexed by [`PC`], a `u32` value.
 /// - Stack pointer register indexed by [`SP`], a `u32` value.
+/// - Stack grows downwards.
 /// - 16bit address space meaning 254Kb of total memory.
 ///
 /// ## Calling convention
@@ -123,22 +125,26 @@ impl VM {
 
   /// Helper function to manage decrementing the stack pointer.
   #[inline(always)]
-  fn stack_dec(&mut self, amt:u32,) {
-    if self.sp().as_u32() >= STACK_SIZE as u32 {
-      panic!("{}", VMErrors::EmptyStack)
+  fn stack_dec(&mut self, amt:u32,) -> Result<(),> {
+    // Stack underflow occurs if we try to remove from an empty stack
+    if self.sp().as_u32() == STACK_SIZE as u32 {
+      return Err(VMErrors::EmptyStack.into(),);
     }
-    // Decrement the SP (grows downards so ad one)
+    // Decrement the SP (grows downards so add amt)
     self.reg[SP] = Memory::from(self.sp().as_u32() + amt,);
+    Ok((),)
   }
 
   #[inline(always)]
   /// Helper function to manage incrementing the stack pointer.
-  fn stack_inc(&mut self, amt:u32,) {
+  fn stack_inc(&mut self, amt:u32,) -> Result<(),> {
     if self.sp().as_u32() == 0 {
-      panic!("{}", VMErrors::StackOverflow)
+      return Err(VMErrors::StackOverflow.into(),);
     }
     // Increment the SP (grows downards so subtract one)
     self.reg[SP] = Memory::from(self.sp().as_u32() - amt,);
+
+    Ok((),)
   }
 
   /// Retrieves the next byte in the program.
@@ -163,6 +169,59 @@ impl VM {
 
     // Return the bytes
     T::from_bytes(bytes,)
+  }
+
+  /// Place an external value onto the top of the [`VM`]'s stack.
+  pub fn extern_push<V,>(&mut self, value:V,)
+  where Memory: From<V,> {
+    // Get increment the SP to the next open slot
+    self.stack_inc(1,).unwrap();
+    // Place the value where SP points
+    self.mem[self.sp().as_u32() as usize] = value.into();
+  }
+
+  /// Remove a value from the [`VM`]'s stack and return it or [`None`] if the
+  /// stack was empty.
+  ///
+  /// # Warning
+  ///
+  /// This will almost certainly cause errors if used. SPDR uses a caller-cleans
+  /// calling convention so it does not expect a function to remove
+  /// from the stack.
+  pub fn extern_pop(&mut self,) -> Option<Memory,> {
+    let sp = self.sp().as_u32();
+    // If the SP is at the top of the stack the stack is empty.
+    if sp == STACK_SIZE as u32 {
+      None
+    }
+    else {
+      // Return the value at the current SP then decrement it to point at the next
+      // item on the stack
+      let val = self.mem[sp as usize];
+      Some(val,)
+    }
+  }
+
+  /// Read a value from the [`VM`]'s stack and return it or [`None`] if the
+  /// stack was empty or `loc` exceeds the bounds of the stack. `loc` indicates
+  /// where in the stack to read from.
+  ///
+  /// # Warning
+  ///
+  /// Does not actually mutate the stack because SPDR uses a caller-cleans
+  /// calling convention so it does not expect a function to remove
+  /// from the stack.
+  pub fn extern_read(&mut self, loc:usize,) -> Option<Memory,> {
+    // Confirm loc is within the bounds of the stack
+    if loc >= STACK_SIZE {
+      None
+    }
+    else {
+      // Return the value at the current SP then decrement it to point at the next
+      // item on the stack
+      let val = self.mem[loc];
+      Some(val,)
+    }
   }
 
   fn decode(&mut self,) -> OpCode {
@@ -593,7 +652,7 @@ impl VM {
     let fn_ptr = self.next_byte() as usize;
 
     // Increment the SP (grows downards so subtract one)
-    self.stack_inc(1,);
+    self.stack_inc(1,).unwrap();
 
     // Store the pc of the next instruction (the return site) on the stack
     self.mem[self.sp().as_u32() as usize] = Memory::from(self.pc().as_u32(),);
@@ -628,7 +687,7 @@ impl VM {
     *self.pc_mut() = Memory::from(self.mem[self.sp().as_u32() as usize].as_u32(),);
 
     // Decrement the SP (grows downards so add one)
-    self.stack_dec(arg_num + 1,);
+    self.stack_dec(arg_num + 1,).unwrap();
   }
 
   /// Implementation of [`OpCode::Alloc`].
@@ -725,7 +784,7 @@ impl VM {
   fn vm_push(&mut self,) {
     // Get the value from the register
     let val = self.reg[self.next_byte() as usize];
-    self.stack_inc(1,);
+    self.stack_inc(1,).unwrap();
 
     // Place the value into the stack
     self.mem[self.sp().as_u32() as usize] = val;
@@ -734,7 +793,7 @@ impl VM {
   /// Implementation of [`OpCode::Pop`].
   #[inline(always)]
   fn vm_pop(&mut self,) {
-    self.stack_dec(1,);
+    self.stack_dec(1,).unwrap();
   }
 
   /// Implementation of [`OpCode::PopR`].
@@ -743,7 +802,7 @@ impl VM {
     // Place the value in the current slot the SP points to into the return
     // register
     self.reg[self.next_byte() as usize] = self.mem[self.sp().as_u32() as usize];
-    self.stack_dec(1,);
+    self.stack_dec(1,).unwrap();
   }
 }
 
@@ -1350,10 +1409,10 @@ mod test {
 
     fn test_1_wrapper(vm:&mut VM, data:&mut dyn Any,) {
       // Get the value to add from the top of the stack
-      let add = vm.mem[vm.sp().as_u32() as usize].as_f32();
+      let add = vm.extern_read(vm.sp().as_u32() as usize,).unwrap().as_f32();
 
       // Get the value to sub from the top of the stack
-      let sub = vm.mem[vm.sp().as_u32() as usize + 1].as_f32();
+      let sub = vm.extern_read(vm.sp().as_u32() as usize + 1,).unwrap().as_f32();
 
       // Convert the external data to the external function's expected type.
       let data = data.downcast_mut::<Opaque>().unwrap();
@@ -1361,10 +1420,7 @@ mod test {
       let ret = test_1(data, add, sub,) as f32;
 
       // Push to the top of the stack
-      // Get increment the SP to the next open slot
-      vm.stack_inc(1,);
-      // Place the return in the slot
-      vm.mem[vm.sp().as_u32() as usize] = Memory(ret.to_le_bytes(),);
+      vm.extern_push(Memory(ret.to_le_bytes(),),);
     }
 
     fn test_2(data:&mut Opaque, add:f32, push_val:f32,) {
@@ -1377,10 +1433,10 @@ mod test {
 
     fn test_2_wrapper(vm:&mut VM, data:&mut dyn Any,) {
       // Get the value to add from the top of the stack
-      let add = vm.mem[vm.sp().as_u32() as usize].as_f32();
+      let add = vm.extern_read(vm.sp().as_u32() as usize,).unwrap().as_f32();
 
       // Get the value to sub from the top of the stack
-      let push_val = vm.mem[vm.sp().as_u32() as usize + 1].as_f32();
+      let push_val = vm.extern_read(vm.sp().as_u32() as usize + 1,).unwrap().as_f32();
 
       // Convert the external data to the external function's expected type.
       let data = data.downcast_mut::<Opaque>().unwrap();
