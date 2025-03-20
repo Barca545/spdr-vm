@@ -82,7 +82,7 @@ dependencies = [
 [[package]]
 name = "spdr-isa"
 version = "0.1.0"
-source = "git+https://github.com/Barca545/spdr-isa.git?rev=497d155f5242ceec2b522645a96f997aac32c840#497d155f5242ceec2b522645a96f997aac32c840"
+source = "git+https://github.com/Barca545/spdr-isa.git?rev=f25ee7a1aef3142c46c23c52e7c032f01df0f983#f25ee7a1aef3142c46c23c52e7c032f01df0f983"
 dependencies = [
  "eyre",
  "num-derive 0.4.2",

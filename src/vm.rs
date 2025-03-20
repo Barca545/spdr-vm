@@ -11,7 +11,7 @@ use spdr_isa::{
   program::Program,
   registers::{EQ, PC, REG_COUNT, SP},
 };
-use std::{any::Any, io::Write};
+use std::{any::Any, io::Write, mem::transmute};
 
 // Refactor:
 // - I either need to add GEQ/LEQ opcodes or just have one CMP instruction which
@@ -270,6 +270,7 @@ impl VM {
       OpCode::Dealloc => self.dealloc(),
       OpCode::RMem => self.rmem(),
       OpCode::WMem => self.wmem(),
+      OpCode::WriteStr => self.write_str(),
       OpCode::MemCpy => self.memcpy(),
       OpCode::Push => self.vm_push(),
       OpCode::Pop => self.vm_pop(),
@@ -312,6 +313,7 @@ impl VM {
       OpCode::Dealloc => self.dealloc(),
       OpCode::RMem => self.rmem(),
       OpCode::WMem => self.wmem(),
+      OpCode::WriteStr => self.write_str(),
       OpCode::MemCpy => self.memcpy(),
       OpCode::Push => self.vm_push(),
       OpCode::Pop => self.vm_pop(),
@@ -804,6 +806,25 @@ impl VM {
     self.reg[self.next_byte() as usize] = self.mem[self.sp().as_u32() as usize];
     self.stack_dec(1,).unwrap();
   }
+
+  /// Takes a pointer and a len. Reads bytes from the pointer to the output
+  /// until the len is reached.
+  #[inline(always)]
+  fn write_str(&mut self,) {
+    let ptr = self.reg[self.next_byte() as usize].as_u32() as usize;
+    let len = self.reg[self.next_byte() as usize].as_u32() as usize;
+
+    let mut string = String::new();
+
+    while string.len() < len {
+      let string_bytes:&[u8] = unsafe { transmute(&self.mem[ptr..ptr + len],) };
+      for byte in string_bytes {
+        string.push(*byte as char,);
+      }
+    }
+
+    print!("{}", string);
+  }
 }
 
 pub const DBG_OPCODES:u8 = 1 << 0;
@@ -852,9 +873,9 @@ mod test {
   };
   use spdr_isa::{
     opcodes::CmpFlag,
-    registers::{EQ, SP},
+    registers::{EQ, FIRST_FREE_REGISTER, SP},
   };
-  use std::{any::Any, cell::RefCell, rc::Rc};
+  use std::{any::Any, cell::RefCell, ptr::copy_nonoverlapping, rc::Rc, sync::Arc};
 
   // Use these for the memory tests
   const OFFSET_16:u16 = 0;
@@ -1223,9 +1244,6 @@ mod test {
     assert_eq!(vm.mem[STACK_SIZE + 19].as_f32(), vm.mem[39].as_f32());
   }
 
-  // TODO: WMEM and RMEM are broken because they do not work with a slab pointer
-  // I either need to fix this so the ptr method does not need to add 20 or make
-  // everything else compensate for this
   #[test]
   fn call_fn_using_regs() {
     // Address of the test function's beginning
@@ -1541,5 +1559,39 @@ mod test {
     let mut vm = VM::new();
     vm.upload(overflow,);
     vm.run();
+  }
+
+  #[test]
+  #[rustfmt::skip]
+  fn write_line() {
+    let mut vm = VM::new();
+
+    // Not sure how this works but took this code from here: https://stackoverflow.com/questions/72185130/how-to-capture-the-content-of-stdout-stderr-when-i-cannot-change-the-code-that-p
+    // Captures the print so it can be tested
+    std::io::set_output_capture(Some(Default::default()));
+
+    // Copy the string into the VM
+    let string = "Hello World\n";
+    let len:usize = string.len();
+    let dst = &vm.mem[STACK_SIZE] as *const Memory as *mut u8;
+    unsafe { copy_nonoverlapping(string as *const str as *const u8, dst, len,) };
+
+    // Load the string info into the VM registers
+    vm.reg[FIRST_FREE_REGISTER] = Memory::from(STACK_SIZE);
+    vm.reg[FIRST_FREE_REGISTER + 1] = Memory::from(len);
+
+    let program = [OpCode::WriteStr.into(), FIRST_FREE_REGISTER as u8, FIRST_FREE_REGISTER as u8 + 1,];
+    vm.upload(program,);
+
+    vm.execute();
+
+    // Finish capturing the output
+    let captured = std::io::set_output_capture(None);
+    let captured = captured.unwrap();
+    let captured = Arc::try_unwrap(captured).unwrap();
+    let captured = captured.into_inner().unwrap();
+    let captured = String::from_utf8(captured).unwrap();
+
+    assert_eq!(captured, string);
   }
 }
