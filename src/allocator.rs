@@ -38,6 +38,7 @@ impl Pool {
   // TODO: It occurs to me these don't need to be constants these could just be
   // arguments. Although, since they are constants doing it this way lets me
   // gaurantee they will be compiled that way.
+  // TODO: Perhaps make it a constant function.
   fn new<const CELL_SIZE: u16, const POOL_SIZE: u16,>(pool_offset:&mut u16,) -> Self {
     // Reversing it like this ensures the lower addressed slabs are at the beginning
     // of the pool. I don't think it matters much in the VM but in theory I believe
